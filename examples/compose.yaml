@@ -27,14 +27,25 @@ services:
       # reverse proxy such as nginx). For plain LAN access use "3081:3081" —
       # basic auth below then becomes mandatory, not optional.
       - "127.0.0.1:3081:3081"
+      # Optional SSH (key-only, opt-in). Publishing this is what makes the
+      # daemon reachable; a login here is a shell with passwordless sudo, so
+      # treat it like a root password and keep it on loopback unless you mean
+      # otherwise (docs/security.md § SSH access).
+      #   - "127.0.0.1:2222:22"
     # Runtime configuration surface: auth pair. Set both auth variables or
     # neither. Setting only one fails startup. Loopback-only publishing (the
     # default) is safe without auth; enable basic auth before switching the
     # publish line to "3081:3081" (plain LAN) or exposing the host proxy
     # publicly. The proxy is the security boundary; see docs/security.md.
+    # Optional SSH: sshd starts only with DSH_SSH_ENABLED, and only public keys
+    # are accepted (no passwords). Supply a key here or persist one in the
+    # volume at ~/.ssh/authorized_keys (mkdir -p home/.ssh; chmod 700 …).
     # environment:
     #   DSH_PROXY_USER: "admin"
     #   DSH_PROXY_PASSWORD: "replace-with-a-strong-password"
+    #   DSH_SSH_ENABLED: "1"
+    #   DSH_SSH_AUTHORIZED_KEYS: "ssh-ed25519 AAAA… you@example"
+    #   DSH_SSH_PORT: "22"
     volumes:
       - dsh-home:/home/dsh
       # Host-visible alternative (owner must be uid 1000; keep :Z on SELinux):

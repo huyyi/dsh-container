@@ -23,13 +23,20 @@ child image). `rustfmt`/`clippy` are installed next to the minimal Rust profile 
 reason; `yq` is installed with `uv tool install` into `/opt/uv-tools` (see
 [deployment.md](deployment.md#installing-tools-that-persist) for why it is the Python `yq`). The
 full rationale and the persistence matrix live in
-[deployment.md](deployment.md) § Built-in tools.
+[deployment.md](deployment.md) § Built-in tools. Two further image-owned payloads are neither
+"tools" nor "data": `openssh-server` with the standalone `/etc/ssh/sshd_config.dsh` (started only
+with `DSH_SSH_ENABLED`), and the pinned dsh plugin payload in `/opt/dsh-plugins`
+(`container/plugin-payload/`, installed with its own `pnpm-lock.yaml` and registered into the web
+profile as *installed but disabled*) — see [deployment.md](deployment.md) § Bundled dsh plugins.
+
+Note that `just` is **not** baked in: Debian 12 (bookworm) does not package it, so the repository's
+`justfile` recipes are a host-side convenience.
 
 ## Build arguments
 
 | Build arg | Default | Description |
 |---|---|---|
-| `BASE_IMAGE` | `debian:13-slim` | Base image (pinned for reproducible builds; override only if you also adjust the `/home/dsh` user-layer assumptions) |
+| `BASE_IMAGE` | `debian:12-slim` | Base image (bookworm; pinned for reproducible builds; override only if you also adjust the `/home/dsh` user-layer assumptions) |
 | `DSH_TAG` | `latest` | Upstream dsh git tag to build (`latest` resolves the newest upstream `dsh-v*` tag at build time). The image is immutable at runtime — there is no in-container dsh auto-update |
 | `BUILD_VERSION` | `latest` | Written to the OCI label `org.opencontainers.image.version`; CI passes the upstream dsh tag on `dsh-v*` tag builds (see [releasing.md](releasing.md)) |
 | `RUST_TOOLCHAIN` | `stable` | Rust toolchain (e.g. `1.88.0`) |

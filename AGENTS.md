@@ -7,7 +7,7 @@ that keep docs and examples aligned with code.
 ## What this repository is
 
 A container image for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`),
-built on `debian:13-slim` and published to GHCR as `ghcr.io/niyueee/dsh-container`. Users pull the
+built on `debian:12-slim` (bookworm) and published to GHCR as `ghcr.io/niyueee/dsh-container`. Users pull the
 image and run it with Docker/Podman; this repo is not an application you run directly.
 
 **Global agent instructions** live at `~/.dsh/AGENTS.md` (`$DSH_HOME`, first) and
@@ -20,10 +20,13 @@ container-environment note for that file lives in
 
 | Path | Purpose |
 |---|---|
-| `Containerfile` | Image build: Debian slim base, Node LTS + pnpm, image-owned rust/uv toolchain (`/opt/rust`, `/usr/local/bin` real binaries), apt podman/crun/Caddy/gh + baked agent CLI tools (ripgrep/fd/python3/ssh/tmux/sqlite3/editors plus a diagnostics set: dig/nc/socat/traceroute/iperf3, file, ncdu, strace, zstd/lz4, just, shellcheck), `uv tool`-installed yq (`/opt/uv-tools`), source-built dsh (`/opt/deepseek-harness`), entrypoint |
+| `Containerfile` | Image build: Debian 12 (bookworm) slim base, Node LTS + pnpm, image-owned rust/uv toolchain (`/opt/rust`, `/usr/local/bin` real binaries), apt podman 4.3/crun/Caddy/gh/openssh-server + baked agent CLI tools (ripgrep/fd/python3/ssh/tmux/sqlite3/editors plus a diagnostics set: dig/nc/socat/traceroute/iperf3, file, ncdu, strace, zstd/lz4, shellcheck; **no `just`** — bookworm does not package it), `uv tool`-installed yq (`/opt/uv-tools`), the pinned plugin payload (`/opt/dsh-plugins`), source-built dsh (`/opt/deepseek-harness`), entrypoint |
 | `container/entrypoint.sh` | Container entrypoint, installed as `/usr/local/bin/entrypoint` |
-| `container/dsh-web.sh` | Stack supervisor: dsh web (mounted with the container-adapt plugin overlay) + session-cookie wait + Caddy reverse proxy (auto-restart), installed as `/usr/local/bin/dsh-web` |
+| `container/dsh-web.sh` | Stack supervisor: dsh web (mounted with the container-adapt plugin overlay) + session-cookie wait + Caddy reverse proxy (auto-restart) + optional sshd under `DSH_SSH_ENABLED`, installed as `/usr/local/bin/dsh-web` |
 | `container/dsh-restart.sh` | Restart dsh web from inside the container, installed as `/usr/local/bin/dsh-restart` |
+| `container/dsh-plugins-seed.sh` | Registers the image plugin payload into the volume's web profile as *installed but disabled*: records `file:/opt/dsh-plugins/node_modules/<name>` dependencies and `node_modules` symlinks, never edits `dsh.profile.bundles`, leaves user-installed copies alone; installed as `/usr/local/bin/dsh-plugins-seed`, called by the entrypoint (opt out with `DSH_SKIP_PLUGIN_SEED=1`) |
+| `container/sshd_config` | Complete standalone sshd configuration (`sshd -f`, so the distro config is never read): key-only, no root login, no PAM, host keys inside the volume; installed as `/etc/ssh/sshd_config.dsh` |
+| `container/plugin-payload/` | Pinned third-party dsh plugin payload (`package.json` + `pnpm-lock.yaml`, `nodeLinker: hoisted`), copied to `/opt/dsh-plugins` and installed with `--frozen-lockfile`; the build writes `/etc/dsh-container/plugins.json` from it and fails if an entry is not a real `dsh.bundle.patch` bundle |
 | `container/plugin/` | The single container-adaptation point, installed at `/opt/dsh-container-plugin`: the runtime Cordis plugin (`index.js` + `overlay.yml`, mounted via `dsh --patch`, with a Standard-Schema `Config`) bootstraps the session cookie inside the dsh process, hides the headless-hostile "open settings document" button (wraps the `settingsController` service's `describe` so it reports `hasDocument: false`, plus a `documentPath` flip on pre-v0.1.7 tags; upstream's own UI never renders it), contributes the `__DSH_TRANSPORT__ = { ownsHost: true }` row to upstream's structured index-injection table (its only consumer is the client `isLoopback`), serves the build-time-extracted images from `/container-assets/*`, and attaches a logger exporter so its own `ctx.logger` lines reach the container log; `scripts/` holds the three build-time post-processing steps (extract inline images, esbuild minification, build-record refresh) |
 | `examples/compose.yaml`, `examples/dsh.container` | Orchestration examples; they pull the published image and are the user-facing deployment reference |
 | `docs/*.md` | User-facing guides (English): deployment, security, build, releasing, development |
@@ -64,7 +67,8 @@ The entrypoint (`container/entrypoint.sh`) does, in order:
    with user directories last. Agent high-frequency CLI tools (ripgrep, fd, python3, zip,
     openssh-client, tmux, sqlite3, vim.tiny/nano, less, rsync, wget, tree, htop, tzdata, patch,
     git-lfs, crun, plus the network/process diagnostics dig/nc/socat/traceroute/iperf3, file, ncdu,
-    strace, zstd/lz4 and the dev tooling just/shellcheck) are baked into the system layer too:
+    strace, zstd/lz4 and shellcheck, plus openssh-server for the opt-in SSH daemon) are baked into
+    the system layer too:
     runtime `apt install` writes the
     container's writable layer and is lost on recreation, so persistent tools belong in the image,
     not in a runtime install. (deliberately absent: `tcpdump`/`iftop`/`mtr` — the container has no
@@ -82,21 +86,32 @@ The entrypoint (`container/entrypoint.sh`) does, in order:
 4. Prepares the in-container podman runtime environment: provisions `XDG_RUNTIME_DIR`
    (`/run/user/<uid>` via passwordless sudo, `/tmp` fallback) — rootless podman cannot start
    without a writable runtime dir. The image deliberately does **not** set
-   `_CONTAINERS_USERNS_CONFIGURED`: on podman 5.x that variable makes the inner podman skip
+   `_CONTAINERS_USERNS_CONFIGURED`: that variable makes the inner podman skip
    user-namespace creation while its runtime still requires it (`euid != 0` → `needsUserns`), so
    the image store and network backend are never initialized and every store-touching command
-   panics on a nil pointer (verified on 5.4.2). The inner podman therefore runs the standard
+   panics on a nil pointer (the failure mode observed on podman 5.x; the image now ships
+   Debian 12's **podman 4.3.1 with crun 1.8.1**, where the same standard rootless flow applies).
+   The inner podman therefore runs the standard
    rootless flow (`unshare` + setuid `newuidmap` over the subuid range — which requires
    `/etc/subuid`/`/etc/subgid` to carry the `dsh` range exactly **once**; duplicate lines make
    the kernel reject the overlapping mapping with `Invalid argument`, which was the original
    reason the variable was introduced). `/etc/bash.bashrc` re-exports
    `XDG_RUNTIME_DIR` for **interactive** `docker exec` shells. The host must still allow
    unprivileged (nested) user namespaces + `/dev/fuse` (+`/dev/net/tun` for rootless networking)
-   and — the podman 5.x requirement — must not mask or read-only the container's `/proc`
+   and — a requirement of newer podman/crun releases, not of the 4.3.1 this image ships — must not
+   mask or read-only the container's `/proc`
    submounts (`--security-opt unmask=ALL` / `systempaths=unconfined`), otherwise crun cannot
    mount `/proc` inside the nested container (`mount proc: Operation not permitted`); see
    `docs/deployment.md` § In-container podman.
-5. `dsh-web` then brings up the whole service stack (it is the container's supervisor — see
+5. Registers the image plugin payload into the volume's web profile by running `dsh-plugins-seed`
+   (from `container/dsh-plugins-seed.sh`): it initializes the profile through
+   `dsh plugin --profile web version-exemptions` when it does not exist yet (upstream's own
+   `initProfile`, offline), records a `file:/opt/dsh-plugins/node_modules/<name>` dependency for
+   every payload package and links `node_modules/<name>` at the image path, and **never** writes
+   `dsh.profile.bundles` — the plugins stay installed-but-disabled for the user to enable in
+   Settings → Plugins (upstream's `listBundles` reports exactly that state; `reconcile()` does not
+   drop such names). Failures warn only; `DSH_SKIP_PLUGIN_SEED=1` disables the step.
+6. `dsh-web` then brings up the whole service stack (it is the container's supervisor — see
    `container/dsh-web.sh`): it starts `dsh web` on `127.0.0.1:$DSH_WEB_PORT` (output mirrored into
    the container log) mounted with the container-adapt plugin overlay
    (`dsh --patch /opt/dsh-container-plugin/overlay.yml --profile web ...` — the `web` alias
@@ -125,7 +140,8 @@ The entrypoint (`container/entrypoint.sh`) does, in order:
    not a silent no-auth fallback. The Caddyfile is generated at runtime into
    `/tmp/dsh-caddy/Caddyfile`; Caddy restarts itself if it crashes (config errors still fail fast
    at startup).
-6. `dsh-web` supervises `dsh web`: if it exits or crashes it is restarted automatically, and the
+7. `dsh-web` supervises `dsh web` and the opt-in sshd: dsh web is restarted when it exits or
+   crashes, and the
    session cookie survives restarts because dsh's signing secret is persisted in the volume (the
    plugin reuses the old cookie while it stays valid). The container has no
    browser, so `dsh-web` appends `--no-open` unless the caller already passed it. Inside the
@@ -134,6 +150,10 @@ The entrypoint (`container/entrypoint.sh`) does, in order:
    contributes to the structured index-injection table (contract item 1) and the
    `/container-assets/*` route for the extracted images; the route is registered through
    `ctx.effect`, and `ctx.on` owns the row subscription, so both dispose with the plugin.
+   With `DSH_SSH_ENABLED` set it also starts and supervises sshd (`container/sshd_config` — a
+   complete standalone config, key-only, no root login, no PAM, `sshd -f` so the distro config is
+   never read); host keys are generated root-owned `0600` inside the volume at `$HOME/.ssh/host`,
+   an unusable daemon disables SSH but never the web stack, and a dead sshd is restarted.
 
 ### Hard constraints from upstream dsh (do not fight these)
 
@@ -203,12 +223,13 @@ The entrypoint (`container/entrypoint.sh`) does, in order:
   `XDG_RUNTIME_DIR`, a `containers.conf` preset (`slirp4netns` as the rootless network command,
   `default_sysctls` emptied — Debian's `ping_group_range` default fatally fails inside nested
   rootless containers), and a `storage.conf` that sets only `mount_program`** (pinning
-  `driver = "overlay"` next to it breaks rootful podman config loading on 5.4.2: `runroot must be
-  set`). Do **not** set `_CONTAINERS_USERNS_CONFIGURED` anywhere: on podman 5.x it makes the inner
-  podman skip user-namespace creation while its runtime still needs it, and every store-touching
-  command then panics on a nil pointer (item 4 above). Nested containers still depend on the host
+  `driver = "overlay"` next to it breaks rootful podman config loading when `runroot`/`graphroot`
+  are unset: `runroot must be set`). Do **not** set `_CONTAINERS_USERNS_CONFIGURED` anywhere: it
+  makes the inner podman skip user-namespace creation while its runtime still needs it, and every
+  store-touching command then panics on a nil pointer (the failure mode seen on podman 5.x; item 4
+  above). Nested containers still depend on the host
   Docker/Podman seccomp and user-namespace settings, `/dev/fuse`, `/dev/net/tun`, and an unmasked
-  `/proc` (podman 5.x: crun cannot mount proc inside the nested container otherwise) — docs must
+  `/proc` (newer crun cannot mount `/proc` inside the nested container otherwise) — docs must
   not promise that `podman run` always works inside this image. **Nested containers never enforce
   cgroup resource limits** (`--memory`/`--cpus` are silently ignored): cgroup v2's
   no-internal-process rule plus the container's own cgroup-namespace root (where every
@@ -223,10 +244,14 @@ The entrypoint (`container/entrypoint.sh`) does, in order:
   them distinct everywhere. The proxy binds `0.0.0.0:3081` because it differs from dsh's port —
   do not reintroduce container-IP binding tricks. The examples publish it on host loopback
   (`127.0.0.1:3081:3081`) — LAN/public exposure is an explicit step (the plain-LAN variant is
-  documented next to the publish line).
-- **Remote access is proxy-only**: the Caddy header rewrite is the only exposure path. Do not
-  add host-trust bypasses; basic auth (`DSH_PROXY_USER`/`DSH_PROXY_PASSWORD`) is the access
-  control.
+  documented next to the publish line). The optional sshd is the only other listener: internal
+  port `DSH_SSH_PORT` (default 22), started only with `DSH_SSH_ENABLED`, published (if at all) as
+  something like `127.0.0.1:2222:22` in the examples.
+- **Remote access is proxy-first**: the Caddy header rewrite is the default exposure path, and
+  basic auth (`DSH_PROXY_USER`/`DSH_PROXY_PASSWORD`) is its access control. The one sanctioned
+  second path is the opt-in, key-only sshd (`DSH_SSH_ENABLED`, offline by default, no password or
+  PAM authentication, root login refused) — never weaken either path with a host-trust bypass, and
+  remember a successful SSH login is root-equivalent because `dsh` has passwordless sudo.
 - **Keep examples and docs in sync with code.** Changing ports, env vars, defaults, or entrypoint
   behavior requires updating all of: `container/entrypoint.sh` header, `Containerfile` comments,
   `examples/compose.yaml`, `examples/dsh.container`, `README.md` + `README.zh.md`,
@@ -301,3 +326,13 @@ just contract dsh-v0.1.2-rc.1  # static upstream-contract check for one tag
    payload in a headless browser): the client artifacts share one script scope once dsh
    concatenates them, and renaming identifiers there breaks the boot in ways no static check
    catches.
+7. If you touched the plugin payload (`container/plugin-payload/`), the seeding
+   (`container/dsh-plugins-seed.sh`, the entrypoint call, `/etc/dsh-container/plugins.json`) or the
+   SSH support (`container/sshd_config`, the `dsh-web.sh` sshd branch, `DSH_SSH_*`), verify both
+   halves in the built image: the payload installs with `--frozen-lockfile` and every package still
+   declares `dsh.bundle.patch`; the web profile ends up with the `file:` dependencies and
+   `node_modules` symlinks but **no** matching `dsh.profile.bundles` entries (installed, disabled),
+   and enabling one in the plugin manager makes it load without network; the daemon does **not**
+   listen without `DSH_SSH_ENABLED`, and with it set an injected key logs in (`id -un` = `dsh`)
+   while an unauthorized key is refused. `tests/smoke.sh` asserts all of this — run it
+   (`just test`) rather than eyeballing the logs.

@@ -123,12 +123,14 @@ prepares the runtime environment itself: the entrypoint provisions a writable
 `/etc/containers/containers.conf` presets `slirp4netns` as the rootless network command and
 empties `default_sysctls`. The inner podman runs the **standard rootless flow** — it creates its
 own user namespace with `unshare` + `newuidmap`; the image deliberately does *not* set
-`_CONTAINERS_USERNS_CONFIGURED`, which on podman 5.x would skip that step and leave the runtime
-half-initialized (nil-pointer panics on every store-touching command).
+`_CONTAINERS_USERNS_CONFIGURED`, which would skip that step and leave the runtime
+half-initialized (nil-pointer panics on every store-touching command). The image ships the version
+Debian 12 packages — podman 4.3.1 with crun 1.8.1.
 
 Whether `podman run` actually succeeds still depends on the host: unprivileged user namespaces and
 `/dev/fuse` must be allowed (plus `/dev/net/tun` for default rootless networking), the seccomp
-profile must permit the inner `unshare(2)`, and — the podman 5.x requirement — the container's
+profile must permit the inner `unshare(2)`, and — for podman 5.x hosts, not for the 4.3.1 the image
+ships — the container's
 `/proc` must not carry masked or read-only submounts, because crun mounts a fresh `/proc` inside
 the nested container and the kernel only allows that in a user namespace when `/proc` is fully
 visible (`--security-opt unmask=ALL`, Quadlet `Unmask=ALL`, Docker
@@ -156,6 +158,36 @@ The image builds dsh from the official `deepseek-ai/deepseek-harness` repository
 `dsh-v*` tag. Runtime updates happen only by replacing the image; the container does not run a
 boot-time package update. Treat the upstream repository and its pnpm dependency tree as the
 supply-chain trust boundary.
+
+## SSH access
+
+The image ships `openssh-server`, but **nothing listens by default**: the daemon is started only
+when `DSH_SSH_ENABLED` is truthy, and `dsh-web` supervises it as one more service in the stack.
+
+Everything about this feature is deliberately conservative:
+
+- **Key-only.** `PasswordAuthentication`, `KbdInteractiveAuthentication` and PAM are off,
+  `PermitRootLogin no`, pubkey only. There is no password to brute-force because the container has
+  no password authentication at all.
+- **The daemon config is self-contained** (`/etc/ssh/sshd_config.dsh`, started with `sshd -f`), so
+  the distribution's `sshd_config` and its defaults are never read: a base-image rebuild cannot
+  silently re-enable a weaker authentication method.
+- **Host keys are not baked in.** They are generated on first start into the data volume at
+  `~/.ssh/host/`, root-owned `0600`. Baking them would give every deployment the same host identity;
+  regenerating them on every container start would make clients refuse to connect.
+- **`DSH_SSH_AUTHORIZED_KEYS` is for convenience, not secret storage** — public keys are not secret,
+  but they do end up in the compose file and in `docker inspect`; the volume file
+  (`~/.ssh/authorized_keys`) is the alternative.
+- **A successful login is root-equivalent.** `dsh` has passwordless `sudo` (see
+  [Container-internal privileges](#container-internal-privileges)); `ssh dsh@host` is a root shell
+  with extra steps. That is why the daemon is opt-in and why the example publishes it on loopback
+  only.
+- **Fail-closed on startup.** If sshd cannot start (no passwordless sudo, invalid `DSH_SSH_PORT`),
+  the container logs a warning and keeps serving the Web UI on 3081 — the access path disappears,
+  the service does not.
+
+If you only need to reach the Web UI from one machine, an SSH *tunnel to the host* (below) is still
+the better answer: it keeps the container's exposure surface at one authenticated proxy port.
 
 ## Remote access
 

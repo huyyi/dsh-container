@@ -237,8 +237,10 @@ Weekly version updates for the dependencies that are pinned in this repository:
 
 - `github-actions` — the action pins in `image.yml` (`actions/checkout`, `docker/*`,
   `softprops/action-gh-release`);
-- `docker` — the `debian:13-slim` base image in the `Containerfile` (uv switched to the official
-  installer script, so it is no longer a Dependabot-managed pin).
+- `docker` — the `debian:12-slim` base image in the `Containerfile` (uv switched to the official
+  installer script, so it is no longer a Dependabot-managed pin). The pinned dsh plugin payload
+  (`container/plugin-payload/pnpm-lock.yaml`) is deliberately **not** covered: update it by hand —
+  change the version in `container/plugin-payload/package.json` and regenerate the lockfile.
 
 Upstream dsh tags are intentionally *not* covered by Dependabot — it has no ecosystem for watching
 another repository's git tags; that is the watcher workflow's job.

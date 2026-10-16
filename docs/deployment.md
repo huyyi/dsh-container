@@ -353,7 +353,7 @@ container never spends its first minutes downloading them:
 | Network diagnostics | `dig`/`nslookup`/`host` (`bind9-dnsutils`), `nc`, `socat`, `traceroute`, `iperf3` — this image's operational surface is mostly network plumbing (Caddy → dsh, plus nested podman's slirp4netns), so connectivity and bandwidth checks are first-class |
 | Files & processes | `file`, `ncdu`, `strace` — inspecting what a file is, what fills the volume, and where the `dsh-web`/Caddy/dsh trio is stuck |
 | Compression & data | `zstd`, `lz4`, `bc`, `moreutils`, `pv`, `uuid-runtime` |
-| Dev tooling | `just` (the repository's `justfile` recipes work inside the container, including `just build` via nested podman), `shellcheck` (the repository's lint gate runs in-container too) |
+| Dev tooling | `shellcheck` (the repository's lint gate runs in-container too). `just` is **not** included: Debian 12 (bookworm) does not package it — run `just` on the host, or `cargo install just` into the volume if you want it inside |
 | YAML / JSON | `yq` — installed with `uv tool install` (see below), not via apt |
 
 `tcpdump`, `iftop` and `mtr` are deliberately **not** installed: the container runs without
@@ -386,7 +386,7 @@ extend the image with a small child `Containerfile`
 `/opt/uv-tools` (`/usr/local/bin/yq`, plus `tomlq`/`xq`). Three things are worth knowing:
 
 - It is the **Python `yq`** (kislyuk's, 4.x), not Mike Farah's Go `yq` — the two have different
-  syntax, and Debian 13's apt only packages this one. It shells out to `/usr/bin/jq` for JSON
+  syntax, and Debian 12's apt only packages this one. It shells out to `/usr/bin/jq` for JSON
   processing, so `jq` is a runtime dependency (the image installs it) and `yq --version` prints a
   second line with jq's version.
 - It upgrades **with the image**, and `uv tool upgrade yq` deliberately fails inside the container
@@ -441,19 +441,20 @@ the runtime environment for **rootless podman as the `dsh` user** (no `sudo` ins
 - **subuid/subgid carry the `dsh` range exactly once.** Duplicate lines make `newuidmap` build an
   overlapping mapping, which the kernel rejects with `Invalid argument` — rootless podman then
   cannot create its user namespace at all.
-- **The image does *not* set `_CONTAINERS_USERNS_CONFIGURED`.** On podman 5.x that variable makes
-  the inner podman skip user-namespace creation while its runtime still requires one (`euid != 0`
-  → `needsUserns`), so the image store and the network backend are never initialized and every
-  store-touching command dies on a nil-pointer panic. Without it the inner podman runs the standard
-  rootless flow: `unshare` + setuid `newuidmap` over the subuid range, then a fully initialized
-  runtime inside that user namespace.
+- **The image does *not* set `_CONTAINERS_USERNS_CONFIGURED`.** That variable makes the inner
+  podman skip user-namespace creation while its runtime still requires one (`euid != 0` →
+  `needsUserns`), so the image store and the network backend are never initialized and every
+  store-touching command dies on a nil-pointer panic (the failure mode observed on podman 5.x).
+  Without it the inner podman runs the standard rootless flow: `unshare` + setuid `newuidmap` over
+  the subuid range, then a fully initialized runtime inside that user namespace. The image ships
+  Debian 12's podman **4.3.1** with crun **1.8.1**.
 - **Storage** is preset for rootless overlay via `fuse-overlayfs`: `/etc/containers/storage.conf`
   sets `mount_program` only. Pinning `driver = "overlay"` next to it (without explicit
   `runroot`/`graphroot`) makes *rootful* podman fail config loading with `runroot must be set`
-  (podman 5.4.2) — rootless podman is unaffected, but the shared file is kept safe for both.
+  — rootless podman is unaffected, but the shared file is kept safe for both.
   `policy.json` accepts any registry.
 - **`/etc/containers/containers.conf`** presets `default_rootless_network_cmd = "slirp4netns"`
-  (the image does not ship `pasta`, podman 5's preferred rootless network command) and empties
+  (the image does not ship `pasta`, which newer podman prefers for rootless networking) and empties
   `default_sysctls` — Debian's default `net.ipv4.ping_group_range` write fatally fails inside a
   nested rootless container (the nested `/proc/sys` is read-only), aborting container creation.
 - **`XDG_RUNTIME_DIR` is provisioned by the entrypoint** (`/run/user/<uid>`, owned by the runtime
@@ -473,8 +474,8 @@ What the **host** must still allow (the image cannot do this part):
 - `/dev/net/tun` for the default rootless networking (slirp4netns/pasta open the tap device).
   Without it, run nested containers with `--network=host` or `--network=none`. On the host:
   `ls -l /dev/net/tun` and `modprobe tun` if it is missing.
-- **No masked or read-only `/proc` submounts in the dsh container — the podman 5.x requirement
-  that is easy to miss.** crun mounts a fresh `/proc` inside every nested container, and the
+- **No masked or read-only `/proc` submounts in the dsh container — the requirement that is easy to
+  miss.** crun mounts a fresh `/proc` inside every nested container, and the
   kernel only allows that inside a user namespace when the container's own `/proc` is fully
   visible. Docker's/Podman's default masked and read-only paths (`/proc/kcore`, `/proc/sys`, …)
   break that, and the nested container fails with `crun: mount proc to proc: Operation not
@@ -542,7 +543,86 @@ controller-enabled cgroup subtree that the `dsh` user owns. No in-image change c
 so the docs promise the graceful degradation (containers run, limits are ignored) rather than
 limits that only work on some hosts.
 
-## 8. Offline use
+## 8. Bundled dsh plugins
+
+The image carries a small, pinned set of third-party dsh plugins. They are **installed but switched
+off**: a fresh volume gets them registered in the `web` profile's `dependencies` and linked into its
+`node_modules`, but *not* listed in `dsh.profile.bundles`, so none of their code loads until you
+enable it.
+
+| Plugin | Version | What it adds |
+|---|---|---|
+| `dsh-plugin-guide` | 0.3.33 | DSH plugin-development skill: docs mirror, compatibility matrix, scaffolder/checker CLI |
+| `@linxin666/dsh-client-ui-skill-explorer` | 0.4.6 | Skills panel in the Web UI — browse by source, enable/disable, create/delete |
+| `@changfenhuang/dsh-genui` | 0.12.0 | Inline generative UI from a ` ```dsh-ui ` fence (charts, forms, mermaid, …) |
+| `dsh-skill-explorer` (from `github:wingsky-1/dsh-skill-explorer`) | 0.1.0 | Alternative zero-build skills panel; upstream archived the repository |
+
+Enable one under **Settings → Plugins**: the manager lists it as installed and disabled, and enabling
+only appends its package name to the profile's bundle list — no download, no network. Disabling is the
+same operation in reverse.
+
+Where the code lives, and why:
+
+- The code is image-owned at `/opt/dsh-plugins`; `container/plugin-payload/` pins exact versions and
+  ships its own `pnpm-lock.yaml`, so plugins upgrade **with the image**.
+- The volume holds only the registration: `~/.dsh/profiles/web/package.json` records a
+  `file:/opt/dsh-plugins/node_modules/<name>` dependency, and `node_modules/<name>` is a symlink to
+  that image path. `dsh-plugins-seed` (run by the entrypoint) maintains both idempotently and
+  **never touches `dsh.profile.bundles`**; a package you installed yourself — a real directory, or a
+  different `file:` path — is left alone.
+- `/etc/dsh-container/plugins.json` is the image-owned manifest the seeding reads; the image build
+  fails if an entry is not a real dsh bundle (`dsh.bundle.patch`).
+- Setting `DSH_SKIP_PLUGIN_SEED=1` skips registration entirely (existing registrations are kept).
+
+Pinning matters: dsh refuses to load a bundle whose `engines.dsh`/peer requirements exclude the
+running dsh. Three currently popular plugins are therefore **not** shipped — `dsh-full-remote`
+peer-pins the 0.1.x client packages, `dsh-tui` pins the 0.2.0-rc.2 package line, and
+`@linxin666/dsh-web-all` needs its install scripts to run (including a `cloudflared` download).
+Install those yourself with `dsh plugin --profile web add <spec>` (adding
+`allow-version --accept-risk` where dsh reports an incompatibility): they land in the volume, not the
+image.
+
+## 9. SSH access
+
+SSH is **off by default**. Reaching the proxy on 3081 stays the normal remote path; enabling SSH adds
+a second one with a much larger blast radius, because the `dsh` user has passwordless `sudo`.
+
+```yaml
+services:
+  dsh:
+    image: ghcr.io/niyueee/dsh-container:latest
+    environment:
+      DSH_SSH_ENABLED: "1"
+      # Either inject a public key…
+      DSH_SSH_AUTHORIZED_KEYS: "ssh-ed25519 AAAA… you@example"
+    ports:
+      # …or publish the port and write ~/.ssh/authorized_keys on the volume yourself.
+      - "127.0.0.1:2222:22"
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DSH_SSH_ENABLED` | unset (off) | Start the daemon (`1`/`true`/`yes`/`on`) |
+| `DSH_SSH_PORT` | `22` | Port sshd listens on inside the container |
+| `DSH_SSH_AUTHORIZED_KEYS` | unset | Public keys appended to `~/.ssh/authorized_keys` (newline-separated, idempotent) |
+
+What the daemon does and does not do:
+
+- **Public key only.** `PasswordAuthentication`, `KbdInteractiveAuthentication` and PAM are all off,
+  and `PermitRootLogin no`. There is no password to guess because there is no password.
+- **Your key lives on the volume.** Add it to `~/.ssh/authorized_keys` (`~/.ssh` mode 0700, file
+  0600) if you would rather not pass it through the environment; the file survives image upgrades.
+- **Host keys live on the volume too**, at `~/.ssh/host/`, root-owned `0600` and generated on first
+  start. They are deliberately not baked into the image (every container would share one identity)
+  and are not rotated on container recreation, so clients never see a surprise key change.
+- **SFTP, SCP and rsync work**, and TCP forwarding is allowed so `ssh -L` tunnels still work. X11,
+  agent forwarding and tunnel devices are off.
+- **A login is root-equivalent.** Treat the port like a root password: keep it on loopback as above,
+  and read [security.md](security.md#ssh-access) before widening it.
+- **SSH fails closed, the Web UI does not.** If the daemon cannot start (no passwordless sudo,
+  invalid `DSH_SSH_PORT`), the container logs a warning and keeps serving 3081.
+
+## 10. Offline use
 
 The running image does not contact the npm registry, and there is no boot-time dsh update to
 disable. The common agent CLI tools (`python3`, `rg`, `fd`, `ssh`, `zip`, ...) are built in, so a
@@ -555,7 +635,7 @@ podman build --format docker \
              -t dsh-container .
 ```
 
-## 9. FAQ
+## 11. FAQ
 
 **Permission errors when writing to `/home/dsh`**
 If you replace the named `dsh-home` volume with a host bind mount at `/home/dsh`, that host

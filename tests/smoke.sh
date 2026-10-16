@@ -56,10 +56,12 @@ done
 
 cid=""
 auth_cid=""
+ssh_cid=""
 cookie_jar="$(mktemp)"
 cookie_relogin="$(mktemp)"
 auth_cookie_jar="$(mktemp)"
-trap '"$DOCKER" rm -f "$cid" "$auth_cid" >/dev/null 2>&1 || true; rm -f "$cookie_jar" "$cookie_relogin" "$auth_cookie_jar"' EXIT
+ssh_keydir=""
+trap '"$DOCKER" rm -f "$cid" "$auth_cid" "$ssh_cid" >/dev/null 2>&1 || true; rm -f "$cookie_jar" "$cookie_relogin" "$auth_cookie_jar"; [ -z "$ssh_keydir" ] || rm -rf "$ssh_keydir"' EXIT
 
 # 失败辅助: 打印标记与容器日志后退出, 便于定位是哪一环、服务端发生了什么。
 die() {
@@ -172,12 +174,13 @@ fi
 # 第二组是本镜像运维面更依赖的诊断工具: 网络栈(Caddy→dsh、嵌套 podman 的
 # slirp4netns)与进程排查。tcpdump/iftop/mtr 刻意不在其中 —— 容器没有
 # CAP_NET_RAW, 装了也抓不到包(docs/deployment.md § Built-in tools)。
-# just/shellcheck 让仓库自己的 justfile 与 lint 在容器内可跑。
+# 内置 shellcheck 让仓库自己的 lint 在容器内可跑(bookworm 的 apt 不再提供 just,
+# 因此镜像不再内置 just; 宿主侧仍可用 just 驱动 build/test)。
 "$DOCKER" exec "$cid" sh -c '
   for t in rg fd patch zip less vi nano ssh rsync wget tree htop sqlite3 tmux crun; do
     command -v "$t" >/dev/null || { echo "missing built-in tool: $t" >&2; exit 1; }
   done
-  for t in dig nc socat traceroute iperf3 file ncdu strace zstd lz4 bc sponge pv uuidgen just shellcheck; do
+  for t in dig nc socat traceroute iperf3 file ncdu strace zstd lz4 bc sponge pv uuidgen shellcheck; do
     command -v "$t" >/dev/null || { echo "missing built-in diagnostics tool: $t" >&2; exit 1; }
   done
   python3 --version
@@ -185,6 +188,51 @@ fi
   crun --version
   git lfs version
 ' || die "built-in tool check failed"
+
+# 镜像自带插件载荷(镜像所有, 随镜像升级): 代码在 /opt/dsh-plugins, 清单
+# /etc/dsh-container/plugins.json 由构建期生成; 每个包必须真的声明
+# dsh.bundle.patch, 否则插件管理器只会把它当普通依赖(装了也启用不了)。
+"$DOCKER" exec "$cid" sh -c '
+  test -s /etc/dsh-container/plugins.json || { echo "plugins.json missing" >&2; exit 1; }
+  test -x /usr/local/bin/dsh-plugins-seed || { echo "dsh-plugins-seed missing" >&2; exit 1; }
+  jq -e ".schema == 1 and (.plugins | length) >= 1" /etc/dsh-container/plugins.json >/dev/null || exit 1
+  for p in $(jq -r ".plugins[].name" /etc/dsh-container/plugins.json); do
+    m="/opt/dsh-plugins/node_modules/$p/package.json"
+    test -f "$m" || { echo "payload package missing: $p" >&2; exit 1; }
+    jq -e ".dsh.bundle.patch" "$m" >/dev/null || { echo "payload package is not a dsh bundle: $p" >&2; exit 1; }
+  done
+' || die "image plugin payload check failed"
+
+# 登记状态 = 已安装但未启用: entrypoint 经 dsh-plugins-seed 写了 profile 的
+# dependencies 与 node_modules 软链, 但**不**动 dsh.profile.bundles —— 启用是
+# 用户在 设置 > 插件管理器 里的动作(docs/deployment.md § Bundled dsh plugins)。
+"$DOCKER" exec "$cid" sh -c '
+  profile="${DSH_HOME:-$HOME/.dsh}/profiles/web"
+  test -f "$profile/package.json" || { echo "web profile not initialized" >&2; exit 1; }
+  for p in $(jq -r ".plugins[].name" /etc/dsh-container/plugins.json); do
+    test -f "$profile/node_modules/$p/package.json" || { echo "plugin not linked into the profile: $p" >&2; exit 1; }
+    jq -e --arg p "$p" ".dependencies[\$p]" "$profile/package.json" >/dev/null \
+      || { echo "plugin dependency not recorded: $p" >&2; exit 1; }
+    jq -e --arg p "$p" "[.dsh.profile.bundles[] | select(. == \$p)] | length == 0" "$profile/package.json" >/dev/null \
+      || { echo "image plugin must stay disabled by default: $p" >&2; exit 1; }
+  done
+  jq -e "[.dsh.profile.bundles[]] | index(\"@deepseek-ai/dsh-web-app\") != null" "$profile/package.json" >/dev/null || exit 1
+' || die "image plugin registration check failed"
+
+# SSH 是 opt-in: 服务端与独立配置必须在镜像里, 但默认既不监听也不生成主机密钥
+# (只有 DSH_SSH_ENABLED=1 时 dsh-web 才会拉起它; 见 docs/security.md "SSH access")。
+"$DOCKER" exec "$cid" sh -c '
+  command -v sshd >/dev/null || { echo "sshd missing" >&2; exit 1; }
+  command -v ssh-keygen >/dev/null || exit 1
+  test -s /etc/ssh/sshd_config.dsh || { echo "sshd config missing" >&2; exit 1; }
+  grep -qx "PasswordAuthentication no" /etc/ssh/sshd_config.dsh || exit 1
+  grep -qx "PermitRootLogin no" /etc/ssh/sshd_config.dsh || exit 1
+  grep -qx "PubkeyAuthentication yes" /etc/ssh/sshd_config.dsh || exit 1
+  getent passwd sshd >/dev/null || { echo "sshd privileged-separation user missing" >&2; exit 1; }
+  pgrep -x sshd >/dev/null && { echo "sshd must not run unless DSH_SSH_ENABLED=1" >&2; exit 1; }
+  home="${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}"
+  test ! -s "$home/.ssh/host/ssh_host_ed25519_key" || { echo "host keys must not exist while SSH is disabled" >&2; exit 1; }
+' || die "SSH support contract check failed"
 
 # yq 经 uv tool 装进镜像(非 apt): 二进制软链在 /usr/local/bin, venv 在
 # /opt/uv-tools。它是 kislyuk 的 Python yq(4.x, 调用 /usr/bin/jq 处理 JSON),
@@ -211,12 +259,13 @@ fi
   esac
 ' || die "pnpm global install contract check failed"
 
-# 容器内 rootless podman 运行期契约(podman 5.4.2 实测):
+# 容器内 rootless podman 运行期契约(bookworm 的 podman 4.3.1; 该契约与版本无关):
 # XDG_RUNTIME_DIR 由 entrypoint provision; /etc/subuid、/etc/subgid 各自必须
 # 只有一行 dsh 区间(重复行使 newuidmap 写出重叠映射, 内核 EINVAL, rootless
-# podman 建不了 userns); 镜像不再导出 _CONTAINERS_USERNS_CONFIGURED=1 ——
-# podman 5.x 下该变量让 rootless 侧跳过 userns 创建而 store/network 不初始化,
-# 之后每条命令 nil panic; containers.conf 预设 slirp4netns + 空 default_sysctls。
+# podman 建不了 userns); 镜像不导出 _CONTAINERS_USERNS_CONFIGURED —— 它让
+# rootless 侧跳过 userns 创建, 而 4.3.1 的运行期仍需要它(5.x 上表现为
+# store/network 不初始化后的 nil panic); containers.conf 预设 slirp4netns +
+# 空 default_sysctls。
 "$DOCKER" exec "$cid" sh -c 'tr "\0" "\n" < /proc/1/environ | grep -Fx "XDG_RUNTIME_DIR=/run/user/1000"' \
   || die "entrypoint did not export XDG_RUNTIME_DIR=/run/user/1000"
 "$DOCKER" exec "$cid" sh -c 'test -d /run/user/1000 && test -O /run/user/1000' \
@@ -224,7 +273,7 @@ fi
 "$DOCKER" exec "$cid" sh -c 'test "$(grep -c "^dsh:100000:65536$" /etc/subuid)" = 1 && test "$(grep -c "^dsh:100000:65536$" /etc/subgid)" = 1' \
   || die "subuid/subgid must carry the dsh range exactly once (duplicates break newuidmap)"
 "$DOCKER" exec "$cid" sh -c '! tr "\0" "\n" < /proc/1/environ | grep -Fxq "_CONTAINERS_USERNS_CONFIGURED=1"' \
-  || die "_CONTAINERS_USERNS_CONFIGURED must NOT be set (breaks podman 5.x rootless)"
+  || die "_CONTAINERS_USERNS_CONFIGURED must NOT be set (rootless podman builds its own userns)"
 "$DOCKER" exec "$cid" sh -c 'grep -q "^default_rootless_network_cmd = \"slirp4netns\"$" /etc/containers/containers.conf' \
   || die "containers.conf must preset the rootless network command to slirp4netns"
 
@@ -481,6 +530,57 @@ if timeout 30 "$DOCKER" run --rm --name dsh-smoke-partial-auth \
 fi
 grep -F 'must be set together' /tmp/dsh-partial-auth.log >/dev/null \
   || die "partial-auth container failed without the expected message"
+
+# SSH opt-in 端到端: DSH_SSH_ENABLED=1 + DSH_SSH_AUTHORIZED_KEYS 投放公钥后,
+# sshd 必须真的起来(经发布端口 2222 → 容器 22), 并只接受这一把钥匙 ——
+# 仅公钥认证, 没有密码/键盘交互回退。宿主机没有 ssh 客户端时退化为
+# "sshd 已监听 + 主机密钥位置/权限正确"的静态断言。
+if ! command -v ssh-keygen >/dev/null 2>&1; then
+  die "ssh-keygen not found on the host (needed for the SSH smoke check)"
+fi
+ssh_keydir="$(mktemp -d)"
+ssh-keygen -q -t ed25519 -N '' -f "$ssh_keydir/id_ed25519" \
+  || die "ssh-keygen failed on the host"
+ssh_cid="$("$DOCKER" run -d --rm --name dsh-smoke-ssh -p 127.0.0.1:2222:22 \
+  -e DSH_HOME=/tmp/dsh-smoke-ssh-home \
+  -e DSH_SSH_ENABLED=1 \
+  -e "DSH_SSH_AUTHORIZED_KEYS=$(cat "$ssh_keydir/id_ed25519.pub")" \
+  "$image")"
+for _ in $(seq 1 90); do
+  "$DOCKER" exec "$ssh_cid" pgrep -x sshd >/dev/null 2>&1 && break
+  running "$ssh_cid" || { "$DOCKER" logs --tail 40 "$ssh_cid" >&2 || true; die "SSH container exited before sshd started"; }
+  sleep 1
+done
+"$DOCKER" exec "$ssh_cid" pgrep -x sshd >/dev/null 2>&1 \
+  || { "$DOCKER" logs --tail 40 "$ssh_cid" >&2 || true; die "sshd did not start with DSH_SSH_ENABLED=1"; }
+# 主机密钥在数据卷路径上, 且必须是 root 属主 0600(root sshd 会拒绝其他属主)。
+"$DOCKER" exec "$ssh_cid" sh -c \
+  '[ "$(stat -c %U:%a /home/dsh/.ssh/host/ssh_host_ed25519_key)" = "root:600" ]' \
+  || die "SSH host key is not root-owned 0600 inside the volume"
+if command -v ssh >/dev/null 2>&1; then
+  ssh_login=""
+  for _ in $(seq 1 30); do
+    ssh_login="$(ssh -i "$ssh_keydir/id_ed25519" -p 2222 \
+      -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+      dsh@127.0.0.1 'id -un' 2>/dev/null || true)"
+    [ "$ssh_login" = "dsh" ] && break
+    sleep 1
+  done
+  [ "$ssh_login" = "dsh" ] \
+    || { "$DOCKER" logs --tail 40 "$ssh_cid" >&2 || true; die "SSH login with the injected key failed (got '${ssh_login:-none}')"; }
+  # 未授权密钥必须被拒: 这是"仅公钥、无密码回退"的正面证据。
+  ssh-keygen -q -t ed25519 -N '' -f "$ssh_keydir/other" || die "ssh-keygen (second key) failed"
+  if ssh -i "$ssh_keydir/other" -p 2222 \
+      -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+      dsh@127.0.0.1 true 2>/dev/null; then
+    die "sshd accepted an unauthorized key (public-key-only auth is broken)"
+  fi
+  echo "=== [smoke] SSH: authorized key logged in, unauthorized key rejected" >&2
+else
+  echo "=== [smoke] note: no ssh client on the host; skipped the real SSH login check" >&2
+fi
 
 # issue #12 回归(同容器重启路径): cookie 文件在 /tmp 里跨 `docker restart`
 # 存活。旧实现把"文件被写了一次(mtime 前进)"当成就绪信号, 而复用该 cookie

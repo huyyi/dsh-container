@@ -24,6 +24,11 @@
 #      运行期崩溃自动重启
 #      (配置错误 fail-fast)。DSH_PROXY_USER + DSH_PROXY_PASSWORD 必须成对设置
 #      以启用 basic auth, 只设置一个直接退出。
+#   4. 可选 SSH 服务端(DSH_SSH_ENABLED, 默认关闭): 以 root 启动
+#      /usr/sbin/sshd -f /etc/ssh/sshd_config.dsh(独立完整配置: 仅公钥、禁 root、
+#      禁密码/PAM), 主机密钥在数据卷 $HOME/.ssh/host(root 属主, 容器重建不轮换),
+#      授权公钥走 ~/.ssh/authorized_keys 或 DSH_SSH_AUTHORIZED_KEYS; 崩溃自动重启,
+#      起不来只关闭 SSH 不阻断 web 栈。安全含义见 docs/security.md "SSH access"。
 # 附加参数会原样透传给 dsh web, 例如 --port 8080; 容器内默认追加
 # --no-open(无浏览器环境), 用户显式传入时不重复。
 set -euo pipefail
@@ -79,14 +84,30 @@ RUNTIME_DIR=/tmp/dsh-caddy
 CADDYFILE="$RUNTIME_DIR/Caddyfile"
 COOKIE_FILE="$RUNTIME_DIR/session-cookie"
 LOG=/tmp/dsh-web.log
+SSH_LOG=/tmp/dsh-sshd.log
+SSH_PIDFILE=/run/sshd.pid
 
 PIDFILE=/tmp/dsh-web.pid
 CHILD_PID=""
 CADDY_PID=""
 STOPPING=0
 
+# 可选 SSH 服务端(opt-in)。默认关闭: 它是与 3081 代理并列的第二条远程入口,
+# 登录后拿到的是一个可免密 sudo 的 shell(等价 root), 因此必须显式开启。
+# DSH_SSH_PORT 覆盖端口(sshd 以 root 启动, 22 可用; 配置见 container/sshd_config)。
+SSH_ENABLED=0
+case "${DSH_SSH_ENABLED:-}" in
+  1|true|TRUE|yes|YES|on|ON) SSH_ENABLED=1 ;;
+esac
+SSH_PORT="${DSH_SSH_PORT:-22}"
+case "$SSH_PORT" in
+  ''|*[!0-9]*) echo "[dsh-web] invalid DSH_SSH_PORT: '$SSH_PORT' (must be a number)" >&2; SSH_ENABLED=0 ;;
+esac
+SSH_HOST_KEY_DIR="$HOME/.ssh/host"
+
 # caddy 存活检查: kill -0 对僵尸进程也返回成功(caddy 的父进程是本脚本,
-# 会回收子进程), 必须通过 /proc 状态排除 Z。
+# 会回收子进程), 必须通过 /proc 状态排除 Z。sshd 的监督复用同一判据
+# (sshd 由 root 启动、自行 daemonize, 不是本脚本的子进程, 只能靠 pidfile)。
 caddy_alive() {
   local st
   st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
@@ -97,12 +118,103 @@ caddy_alive() {
   return 0
 }
 
+# --- 可选 sshd(DSH_SSH_ENABLED) ------------------------------------------------
+# 配置 /etc/ssh/sshd_config.dsh 是独立完整文件: 不读发行版 sshd_config, 因此
+# 发行版默认值不会悄悄改变认证行为(仅公钥、禁 root、禁密码/PAM)。主机密钥在
+# 数据卷 $HOME/.ssh/host, 但属主必须是 root: root sshd 拒绝非 root 属主的主机
+# 密钥, 而放进卷里是为了容器重建后密钥不轮换(轮换会让所有客户端拒绝连接)。
+ssh_pid() {
+  cat "$SSH_PIDFILE" 2>/dev/null || true
+}
+
+sshd_alive() {
+  local pid
+  pid="$(ssh_pid)"
+  [ -n "$pid" ] || return 1
+  caddy_alive "$pid"
+}
+
+prepare_sshd() {
+  # 特权分离目录在容器里不是开机自建(systemd-tmpfiles 不跑), 必须显式建,
+  # 否则 sshd 直接以 "Missing privilege separation directory" 退出。
+  if ! sudo -n mkdir -p /run/sshd 2>/dev/null || ! sudo -n chmod 0755 /run/sshd 2>/dev/null; then
+    echo "[dsh-web] cannot create /run/sshd (passwordless sudo is required for SSH)" >&2
+    return 1
+  fi
+  # 逐把生成缺失的主机密钥: 只在对应文件缺失时生成, 已存在的密钥绝不重写 ——
+  # 重写等于轮换主机密钥, 所有客户端都会拒绝连接。生成/属主/权限三步都显式检查:
+  # 本函数在 `if prepare_sshd && ...` 的条件上下文里调用, set -e 被挂起, 隐式失败
+  # 会被当成成功。
+  if ! sudo -n install -d -m 0700 -o root -g root "$SSH_HOST_KEY_DIR" 2>/dev/null; then
+    echo "[dsh-web] cannot prepare $SSH_HOST_KEY_DIR (needs passwordless sudo); SSH stays off" >&2
+    return 1
+  fi
+  local kt bits keyfile
+  for kt in ed25519 rsa; do
+    keyfile="$SSH_HOST_KEY_DIR/ssh_host_${kt}_key"
+    if [ ! -s "$keyfile" ]; then
+      echo "[dsh-web] generating SSH host key ($kt) in $SSH_HOST_KEY_DIR" >&2
+      if [ "$kt" = "rsa" ]; then
+        bits=3072
+        sudo -n ssh-keygen -q -t rsa -b "$bits" -N '' -f "$keyfile" \
+          || { echo "[dsh-web] ssh-keygen failed for $keyfile" >&2; return 1; }
+      else
+        sudo -n ssh-keygen -q -t "$kt" -N '' -f "$keyfile" \
+          || { echo "[dsh-web] ssh-keygen failed for $keyfile" >&2; return 1; }
+      fi
+    fi
+    # root sshd 只接受 root 属主、0600 的主机密钥(旧卷/旧镜像可能留下别的属主)。
+    sudo -n chown root:root "$keyfile" || return 1
+    sudo -n chmod 0600 "$keyfile" || return 1
+  done
+  # 授权公钥: DSH_SSH_AUTHORIZED_KEYS 是最省事的投放方式(公钥不保密, 但会出现在
+  # 编排配置与 inspect 里), 幂等去重; 标准位置 ~/.ssh/authorized_keys 同样可用。
+  if [ -n "${DSH_SSH_AUTHORIZED_KEYS:-}" ]; then
+    mkdir -p "$HOME/.ssh" || return 1
+    chmod 700 "$HOME/.ssh" || return 1
+    touch "$HOME/.ssh/authorized_keys" || return 1
+    chmod 600 "$HOME/.ssh/authorized_keys" || return 1
+    local key
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      if ! grep -qxF "$key" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
+        printf '%s\n' "$key" >> "$HOME/.ssh/authorized_keys" \
+          || { echo "[dsh-web] cannot append DSH_SSH_AUTHORIZED_KEYS to $HOME/.ssh/authorized_keys" >&2; return 1; }
+      fi
+    done <<< "$DSH_SSH_AUTHORIZED_KEYS"
+  fi
+  if [ ! -s "$HOME/.ssh/authorized_keys" ]; then
+    echo "[dsh-web] WARNING: no ~/.ssh/authorized_keys yet; sshd still starts, but key-only auth means nobody can log in until a key is added" >&2
+  fi
+  return 0
+}
+
+start_sshd() {
+  # -o Port 覆盖配置里的 Port(命令行标量选项优先); -E 把 sshd 日志写文件,
+  # 排障时 docker exec 查看。sshd 自己 fork 到后台并写 $SSH_PIDFILE, 所以这里
+  # 不 tail、不 wait, 由监督循环重启。
+  : > "$SSH_LOG"
+  if ! sudo -n /usr/sbin/sshd -f /etc/ssh/sshd_config.dsh -E "$SSH_LOG" -o "Port=$SSH_PORT"; then
+    echo "[dsh-web] sshd failed to start; log follows:" >&2
+    cat "$SSH_LOG" >&2 2>/dev/null || true
+    return 1
+  fi
+  echo "[dsh-web] sshd started on port $SSH_PORT (pid $(ssh_pid)); key-only auth, host keys in $SSH_HOST_KEY_DIR" >&2
+  return 0
+}
+
 # SC2317: cleanup() 只经下面的 trap 调用, shellcheck 静态看是"不可达", 属误报。
 # shellcheck disable=SC2317
 cleanup() {
   STOPPING=1
   if [ -n "$CADDY_PID" ]; then
     kill "$CADDY_PID" 2>/dev/null || true
+  fi
+  # sshd 以 root 运行, 普通 kill 会被 EPERM 拒绝; 免密 sudo 兜底。
+  local spid
+  spid="$(ssh_pid)"
+  if [ -n "$spid" ]; then
+    sudo -n kill "$spid" 2>/dev/null || kill "$spid" 2>/dev/null || true
   fi
   if [ -n "$CHILD_PID" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
     kill "$CHILD_PID" 2>/dev/null || true
@@ -275,10 +387,25 @@ restart_caddy() {
   start_caddy
 }
 
-# --- 栈引导: dsh web → 会话 cookie → Caddy -------------------------------------
+# --- 栈引导: sshd(可选) → dsh web → 会话 cookie → Caddy -----------------------
 # cookie 文件已存在(同一容器重启)时 wait_for_cookie 立即返回 —— 复用路径
 # 不会写盘, 所以这里绝不能等"被写一次"。
 mkdir -p "$RUNTIME_DIR"
+
+# SSH 先于 web 栈起来: 栈起不来时, SSH 是唯一还能进去排障的入口。启动失败
+# (例如没有免密 sudo)只关闭 SSH, 绝不阻断 web 栈 —— 访问权的 fail-closed
+# 由"没有 sshd"本身满足。
+if [ "$SSH_ENABLED" = "1" ]; then
+  if prepare_sshd && start_sshd; then
+    :
+  else
+    echo "[dsh-web] SSH was requested but could not be started; continuing without it" >&2
+    SSH_ENABLED=0
+  fi
+else
+  echo "[dsh-web] SSH server disabled (set DSH_SSH_ENABLED=1 to enable; see docs/security.md)" >&2
+fi
+
 start_dsh_web
 if ! wait_for_cookie; then
   echo "[dsh-web] session bootstrap failed; refusing to serve" >&2
@@ -332,6 +459,13 @@ while [ "$STOPPING" = "0" ]; do
   if [ -n "$CADDY_PID" ] && ! caddy_alive "$CADDY_PID"; then
     echo "[dsh-web] caddy exited; restarting" >&2
     restart_caddy || exit 1
+  fi
+  if [ "$SSH_ENABLED" = "1" ] && ! sshd_alive; then
+    echo "[dsh-web] sshd exited; restarting" >&2
+    if ! start_sshd; then
+      echo "[dsh-web] sshd could not be restarted; SSH stays off until the container restarts" >&2
+      SSH_ENABLED=0
+    fi
   fi
   sleep 2
 done

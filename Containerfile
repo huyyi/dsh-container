@@ -2,9 +2,14 @@
 #
 # DeepSeek Harness (dsh) 容器镜像
 #
-# 基础镜像: debian:13-slim —— 只保留本项目需要的工具链: Node.js LTS、pnpm、
-# uv、Rust/cargo、Caddy、podman、gh, 外加一组 agent 高频 CLI 工具
-# (ripgrep/fd/python3/zip/openssh-client/tmux/sqlite3/编辑器/网络诊断等)。
+# 基础镜像: debian:12-slim(bookworm) —— 只保留本项目需要的工具链: Node.js LTS、
+# pnpm、uv、Rust/cargo、Caddy、podman、gh, 外加一组 agent 高频 CLI 工具
+# (ripgrep/fd/python3/zip/openssh-client/tmux/sqlite3/编辑器/网络诊断等),
+# 以及可选的 SSH 服务端(openssh-server: 默认不启动, 只有 DSH_SSH_ENABLED 打开时
+# 由 dsh-web 拉起, 仅公钥认证, 见下文与 docs/security.md"SSH access")。
+# bookworm 钉住的版本: podman 4.3.1 / crun 1.8.1 / caddy 2.6.2 / shellcheck 0.9.0;
+# 注意 bookworm 的 apt 没有 just(1.40 才进 trixie), 因此本镜像不再内置 just,
+# 嵌套 podman 的运行期约定也按 4.3.1 编写(见 docs/deployment.md "In-container podman")。
 # 后者全部进系统层: 卷上只放数据, agent 或用户在容器内 apt install 的东西会随
 # 容器重建丢失(可写层), 常用的就应当在构建期烘干, 避免每次重建都重新下载。
 # 在此之上按官方仓库 https://github.com/deepseek-ai/deepseek-harness 的源码
@@ -51,6 +56,19 @@
 #          .dsh-build 摘要(前两步改了字节, 否则 readClientBuildRecord 会失败)。
 #     三步都 fail-fast。不再注入 randomUUID polyfill: 上游自带
 #     不依赖 secure context 的 randomUuid()(util-crypto)
+#   - 镜像自带一组 dsh 插件(见下文"插件载荷"一节): 代码按精确版本装在
+#     /opt/dsh-plugins(镜像所有, 随镜像升级整体重置), 首次启动由
+#     dsh-plugins-seed 登记进数据卷 web profile 的 dependencies 与 node_modules
+#     软链, 但**不**写 dsh.profile.bundles —— 状态是"已安装但未启用": 插件在
+#     设置 > 插件管理器 里显示为已安装/未启用, 用户点一下即启用(只追加一个包名,
+#     全程离线)。之所以不预置到 /home/dsh: 该目录整体是数据卷(也可能是 bind
+#     mount), 镜像构建期写进去的内容会被卷遮蔽; 卷上只多两条元数据
+#   - 可选 SSH 服务端(opt-in): 第 1 步装 openssh-server, DSH_SSH_ENABLED 为真时
+#     dsh-web 用 root 启动 /usr/sbin/sshd -f /etc/ssh/sshd_config.dsh(独立完整
+#     配置, 不读发行版 sshd_config), 仅公钥认证、禁 root 登录、禁密码与 PAM;
+#     主机密钥在数据卷 $HOME/.ssh/host(root 属主 0600, 容器重建不轮换),
+#     授权公钥走卷上的 ~/.ssh/authorized_keys。登录即得到一个可免密 sudo 的
+#     shell(等价 root), 端口未发布时不可达, 见 docs/security.md "SSH access"
 #   - 分层(hermes-agent 模式): 工具链全部是镜像所有的系统层真二进制 —— uv/pnpm
 #     与 rustup 代理在 /usr/local/bin、rust 工具链树在 /opt/rust、dsh 在
 #     /opt/deepseek-harness、yq 的独立 venv 在 /opt/uv-tools, 随镜像更新整体
@@ -71,9 +89,11 @@
 #     时缺失会导致 rootless podman 直接失败), /etc/bash.bashrc 给 docker exec
 #     的交互 shell 兜底导出; /etc/containers/containers.conf 预设 rootless
 #     网络后端为 slirp4netns 并清空 default_sysctls(嵌套场景写 /proc/sys
-#     必败)。绝不再导出 _CONTAINERS_USERNS_CONFIGURED: podman 5.x 下它使
-#     rootless 侧跳过 userns 创建而 store/network 不初始化, 之后每条命令
-#     nil panic(实测 5.4.2), 详见 docs/deployment.md "In-container podman"
+#     必败)。绝不导出 _CONTAINERS_USERNS_CONFIGURED: 它让内层 podman 跳过
+#     userns 创建, 而 bookworm 的 podman 4.3.1 rootless 路径仍需要它(在 5.x 上
+#     表现为 store/network 不初始化的 nil panic); 该变量早年是为绕开 newuidmap
+#     失败而加, 而真正的失败原因是上面的 subuid 重复行。
+#     详见 docs/deployment.md "In-container podman"
 #   - 随后以 `dsh web` 启动 Web UI, 监听 127.0.0.1:3080
 #     (上游 tag 与 main 均拒绝 --host 0.0.0.0: 上游有意为之的安全设计)
 #   - 遥测默认关闭: entrypoint 导出 DSH_TELEMETRY_MODE=DISABLED(可覆盖),
@@ -93,7 +113,7 @@
 # ---- 构建参数(全部有默认值) ----------------------------------------------
 # BASE_IMAGE 声明在 FROM 之前(全局作用域), 供 FROM 行使用; 其余 ARG 在 FROM
 # 之后重新声明才对本阶段可见。
-ARG BASE_IMAGE=debian:13-slim
+ARG BASE_IMAGE=debian:12-slim
 
 FROM ${BASE_IMAGE}
 
@@ -148,7 +168,9 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/home/dsh/.local/bin:/home/dsh/.cargo/bi
 #    追踪 dsh-web/Caddy/dsh)、zstd/lz4/bc/moreutils/pv/uuid-runtime(数据处理)。
 #    刻意**不**装 tcpdump/iftop/mtr: 容器 CapEff 无 CAP_NET_RAW(实测
 #    0x201000=cap_net_admin,cap_sys_admin), 抓包套接字打不开, 装了也只会让
-#    使用者以为能用。just/shellcheck 是开发工具(见 docs/deployment.md 同节)。
+#    使用者以为能用。shellcheck 是开发工具(bookworm 起不再有 just 包, 见上);
+#    另有 openssh-server(只有显式开启 DSH_SSH_ENABLED 才会启动)与随镜像发布的
+#    插件载荷 /opt/dsh-plugins(见"插件载荷")。
 # ---------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -181,6 +203,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     vim-tiny \
     nano \
     openssh-client \
+    openssh-server \
     rsync \
     wget \
     iputils-ping \
@@ -206,7 +229,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     moreutils \
     pv \
     uuid-runtime \
-    just \
     shellcheck \
     && mkdir -p -m 755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -223,7 +245,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && FD_BIN="$(command -v fdfind || command -v fd-find || true)" \
     && if [ -z "$FD_BIN" ]; then echo "fd binary (fdfind) missing after fd-find install" >&2; exit 1; fi \
     && ln -sfn "$FD_BIN" /usr/local/bin/fd \
-    && fd --version
+    && fd --version \
+    # openssh-server 的 postinst 可能已在镜像层生成主机密钥 —— 那会让所有容器共用
+    # 同一份密钥(等于人人皆知), 因此构建期删掉: 主机密钥在首次启动时生成到数据卷
+    # (root 0600, 容器重建不轮换), sshd 的配置只引用卷内路径(container/sshd_config)。
+    && rm -f /etc/ssh/ssh_host_* \
+    # 特权分离用户由包创建, 运行时以 root 启动 sshd 需要它; 缺失直接构建失败。
+    && getent passwd sshd >/dev/null \
+    && ssh -V
 
 # ---------------------------------------------------------------------------
 # 2. 创建 dsh 用户、免密 sudo 组、rootless Podman 映射;
@@ -260,9 +289,9 @@ EOF
 #    overlay 时挂载程序同样生效(rootless 在无 userns overlay 支持的内核上走
 #    fuse-overlayfs); 而 "driver=overlay + mount_program 但不给
 #    runroot/graphroot" 会让 rootful podman 加载配置即失败
-#    (podman 5.4.2 实测: "runroot must be set"), rootless 侧反而正常。
+#    ("runroot must be set"), rootless 侧反而正常。
 #    containers.conf: 默认 rootless 网络后端固定为 slirp4netns(镜像不装
-#    pasta, 而 podman 5 首选 pasta, 缺失即报错); default_sysctls 清空 ——
+#    pasta, 而较新的 podman 首选 pasta, 缺失即报错); default_sysctls 清空 ——
 #    Debian 默认的 net.ipv4.ping_group_range 写入在嵌套 rootless 容器里必然
 #    失败(内层 /proc/sys 只读, crun 写 sysctl 失败即容器创建失败)。
 # ---------------------------------------------------------------------------
@@ -327,15 +356,18 @@ RUN set -eux; \
     rustup --version
 
 # ---------------------------------------------------------------------------
-# 7. 入口、dsh web 守护/重启与容器适配插件
-#    (插件 = 全部进程内适配逻辑的唯一维护点, 见 container/plugin/)
+# 7. 入口、dsh web 守护/重启、插件登记脚本、可选 sshd 配置与容器适配插件
+#    (适配插件 = 全部进程内适配逻辑的唯一维护点, 见 container/plugin/)
 # ---------------------------------------------------------------------------
 COPY container/entrypoint.sh /usr/local/bin/entrypoint
 COPY container/dsh-web.sh /usr/local/bin/dsh-web
 COPY container/dsh-restart.sh /usr/local/bin/dsh-restart
 COPY container/healthcheck.sh /usr/local/bin/healthcheck
+COPY container/dsh-plugins-seed.sh /usr/local/bin/dsh-plugins-seed
+COPY container/sshd_config /etc/ssh/sshd_config.dsh
 COPY container/plugin /opt/dsh-container-plugin
-RUN chmod 755 /usr/local/bin/entrypoint /usr/local/bin/dsh-web /usr/local/bin/dsh-restart /usr/local/bin/healthcheck
+RUN chmod 755 /usr/local/bin/entrypoint /usr/local/bin/dsh-web /usr/local/bin/dsh-restart /usr/local/bin/healthcheck /usr/local/bin/dsh-plugins-seed \
+    && chmod 644 /etc/ssh/sshd_config.dsh
 
 # ---------------------------------------------------------------------------
 # 8. 拉取 dsh 官方源码并切换到指定 tag(默认 latest = 官方最新 tag)
@@ -363,8 +395,41 @@ RUN set -eux; \
     pnpm --version
 
 # ---------------------------------------------------------------------------
-# 10. 安装 yq(经 uv, 系统层: 与 uv/pnpm/cargo 同属"镜像持有的工具")
-#     Debian 13 的 apt 只提供 Python 版 yq(3.4.3, 与 jq 语法不同), 因此走
+# 10. 插件载荷: 镜像自带的 dsh 插件(精确版本 + 锁文件, 见 container/plugin-payload/)
+#     装进 /opt/dsh-plugins —— 这里只把代码装好, 不碰任何 profile: 首次启动时
+#     dsh-plugins-seed 才把包登记进数据卷 web profile 的 dependencies 与
+#     node_modules 软链, 且**不**写 dsh.profile.bundles(状态 = 已安装未启用,
+#     用户在 设置 > 插件管理器 里一键启用, 全程离线)。
+#     不用 `dsh plugin add` 的原因: 那会把包装进 $DSH_HOME/profiles(数据卷),
+#     镜像升级带不走, 而且要依赖构建期的 profile 状态; 独立 pnpm 工程 + 软链让
+#     "代码归镜像、启用状态归用户"这条边界保持干净。
+#     nodeLinker: hoisted —— 顶层就是真实包目录, profile 里的软链指过来即可解析,
+#     包自身的依赖也在同一层(不依赖虚拟 store 布局); --frozen-lockfile 保证传递
+#     依赖可复现(与第 12 步构建 dsh 本体同一原则)。
+#     /etc/dsh-container/plugins.json 是运行期唯一输入(镜像所有, 0444):
+#     root + 每个包的绝对路径; 构建期顺手校验每个包都真的声明了 dsh.bundle.patch,
+#     否则插件管理器只会把它当普通依赖(装了也启用不了)。
+# ---------------------------------------------------------------------------
+COPY container/plugin-payload /opt/dsh-plugins
+RUN set -eux; \
+    cd /opt/dsh-plugins; \
+    pnpm install --frozen-lockfile --store-dir /tmp/dsh-plugin-store; \
+    rm -rf /tmp/dsh-plugin-store node_modules/.bin; \
+    mkdir -p /etc/dsh-container; \
+    jq -cn --arg root /opt/dsh-plugins --argjson deps "$(jq -c '.dependencies' package.json)" \
+      '{schema:1,root:$root,plugins:($deps|keys|map({name:.,path:($root+"/node_modules/"+.)}))}' \
+      > /etc/dsh-container/plugins.json; \
+    chmod 0444 /etc/dsh-container/plugins.json; \
+    for p in $(jq -r '.plugins[].name' /etc/dsh-container/plugins.json); do \
+      test -f "node_modules/$p/package.json"; \
+      jq -e '.dsh.bundle.patch' "node_modules/$p/package.json" >/dev/null; \
+    done; \
+    cat /etc/dsh-container/plugins.json
+
+# ---------------------------------------------------------------------------
+# 11. 安装 yq(经 uv, 系统层: 与 uv/pnpm/cargo 同属"镜像持有的工具")
+#     Debian 12(bookworm)的 apt 只提供 Python 版 yq(kislyuk 的 python-yq,
+#     与 Go 版 yq 语法不同), 因此走
 #     uv tool: 落成 /opt/uv-tools/yq 下的独立 venv + /usr/local/bin/{yq,tomlq,xq}
 #     软链。这个 venv 的解释器指向系统 /usr/bin(PyYAML 与 stdlib 自带依赖),
 #     不依赖 ~/.local/share/uv 里 uv 托管的 Python, 因此运行期不碰用户卷。
@@ -385,7 +450,7 @@ RUN set -eux; \
     yq --version
 
 # ---------------------------------------------------------------------------
-# 11. 从源码构建 dsh(系统层 /opt/deepseek-harness; 构建产物与镜像绑定)
+# 12. 从源码构建 dsh(系统层 /opt/deepseek-harness; 构建产物与镜像绑定)
 #     产物后处理顺序固定: 抽图 -> minify -> 重写构建记录(详见文件头说明)。
 #     esbuild 是构建期专用工具: 装进一次性前缀, 用完在同一层删除, 不进最终镜像。
 # ---------------------------------------------------------------------------
@@ -417,7 +482,7 @@ RUN --mount=type=cache,target=/root/.pnpm-store,id=pnpm-store \
     dsh --version
 
 # ---------------------------------------------------------------------------
-# 12. 预热 apt 包索引: 最终镜像保留一份最新 /var/lib/apt/lists, 容器内开箱
+# 13. 预热 apt 包索引: 最终镜像保留一份最新 /var/lib/apt/lists, 容器内开箱
 #     即可 apt install, 无需先手动 apt-get update。前面各步骤用完即清是为了
 #     压缩中间层; 这里的索引属于系统层, 随镜像升级重置(索引会随镜像变旧,
 #     过期时容器内先 sudo apt-get update 再装, 见 docs/build.md)
@@ -425,17 +490,21 @@ RUN --mount=type=cache,target=/root/.pnpm-store,id=pnpm-store \
 RUN apt-get update
 
 # ---------------------------------------------------------------------------
-# 13. 运行配置
+# 14. 运行配置
 # ---------------------------------------------------------------------------
 WORKDIR /home/dsh
-EXPOSE 3081
+# 3081 是 Caddy 反代(唯一的默认对外入口); 22 只在显式开启 DSH_SSH_ENABLED
+# 时才会监听(见 container/sshd_config), 这里一并声明便于使用者阅读 ——
+# EXPOSE 本身只是文档, 真正的可达性取决于编排层是否发布端口。
+EXPOSE 3081 22
 
 # 容器内 podman(rootless): 走标准 rootless 流程(unshare + setuid newuidmap,
 # 前提是 subuid/subgid 各自只有一行 dsh 区间, 见上文步骤 2), 因此绝不能
-# 导出 _CONTAINERS_USERNS_CONFIGURED —— podman 5.x 下它让内层 podman 跳过
-# userns 创建, 而 makeRuntime 仍按 euid!=0 走 needsUserns 分支: store 与
-# network 后端从不初始化, 之后每条命令都是 nil 解引用 panic(实测 5.4.2;
-# 该变量早年为绕开 newuidmap 失败而加, 而失败的真正原因是 subuid 重复行)。
+# 导出 _CONTAINERS_USERNS_CONFIGURED —— 它让内层 podman 跳过 userns 创建, 而
+# makeRuntime 仍按 euid!=0 走 needsUserns 分支: store 与 network 后端从不初始化,
+# 之后每条命令都是 nil 解引用 panic(该变量早年为绕开 newuidmap 失败而加, 而
+# 失败的真正原因是 subuid 重复行)。bookworm 的 podman 是 4.3.1, 但这条约定与
+# 版本无关: rootless 侧必须自己建 userns。
 # XDG_RUNTIME_DIR 由 entrypoint provision /run/user/$UID(以及 /etc/bash.bashrc
 # 给 exec shell 兜底), 不进 ENV 是因为它依赖运行期 uid。宿主侧还需的
 # /dev/fuse、/dev/net/tun、unmask /proc 等条件见 docs/deployment.md

@@ -1,0 +1,11 @@
+{
+  "name": "dsh-container-plugin-payload",
+  "private": true,
+  "description": "Image-owned dsh plugin payload: code only, installed at /opt/dsh-plugins. Enabling a plugin is a per-profile user action (see container/dsh-plugins-seed.sh).",
+  "dependencies": {
+    "@changfenhuang/dsh-genui": "0.12.0",
+    "@linxin666/dsh-client-ui-skill-explorer": "0.4.6",
+    "dsh-plugin-guide": "0.3.33",
+    "dsh-skill-explorer": "github:wingsky-1/dsh-skill-explorer#ff810bbca27dd2bbe34db4c3865b79f316f67e77"
+  }
+}

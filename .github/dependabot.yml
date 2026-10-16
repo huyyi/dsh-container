@@ -5,8 +5,9 @@
 # 这里只覆盖本仓库能直接 pin 的依赖:
 #   - github-actions: image.yml 里的 action 版本 pin
 #     (actions/checkout、docker/*、softprops/action-gh-release)
-#   - docker: Containerfile 的 debian:13-slim 基础镜像
-#     (uv 已改用官方安装脚本安装, 不再是 COPY --from 的镜像 pin)
+#   - docker: Containerfile 的 debian:12-slim 基础镜像
+#     (uv 已改用官方安装脚本安装, 不再是 COPY --from 的镜像 pin;
+#      container/plugin-payload/ 的插件锁文件刻意手工升级, 不在此列)
 version: 2
 updates:
   - package-ecosystem: "github-actions"

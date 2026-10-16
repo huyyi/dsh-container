@@ -42,11 +42,13 @@ the image. There is no login step: the proxy bootstraps the dsh session automati
 
 | Component | Description |
 |---|---|
-| Base image | `debian:13-slim` (pinned; overridable via the `BASE_IMAGE` build arg) |
-| Toolchain | Node.js 22 LTS, pnpm, uv, Rust/cargo (+ rustfmt/clippy), git + git-lfs, build-essential, Caddy, podman + crun, gh, yq — image-owned real binaries, upgraded with the image |
-| Agent CLI tools | ripgrep, fd, python3, zip, openssh-client, tmux, sqlite3, vim.tiny/nano, less, rsync, wget, tree, htop, tzdata, patch, plus a diagnostics set (dig/nc/socat/traceroute/iperf3, file, ncdu, strace, zstd/lz4, bc, moreutils, pv, uuid-runtime) and dev tooling (just, shellcheck) — baked into the system layer, so a fresh container never re-downloads them (runtime `apt install` would be lost on recreation) |
+| Base image | `debian:12-slim` (bookworm; pinned, overridable via the `BASE_IMAGE` build arg) |
+| Toolchain | Node.js 22 LTS, pnpm, uv, Rust/cargo (+ rustfmt/clippy), git + git-lfs, build-essential, Caddy, podman 4.3 + crun, gh, yq — image-owned real binaries, upgraded with the image |
+| Agent CLI tools | ripgrep, fd, python3, zip, openssh-client, tmux, sqlite3, vim.tiny/nano, less, rsync, wget, tree, htop, tzdata, patch, plus a diagnostics set (dig/nc/socat/traceroute/iperf3, file, ncdu, strace, zstd/lz4, bc, moreutils, pv, uuid-runtime) and `shellcheck` — baked into the system layer, so a fresh container never re-downloads them (runtime `apt install` would be lost on recreation). `just` is not included: bookworm does not package it |
 | Nested containers | podman in-container (rootless) with `XDG_RUNTIME_DIR`, subuid/subgid and the network/sysctl defaults preconfigured; the host runtime must allow unprivileged user namespaces + `/dev/fuse` + `/dev/net/tun` and must not mask the container's `/proc` (`--security-opt unmask=ALL`, Quadlet `Unmask=ALL`, Docker `systempaths=unconfined`); resource limits (`--memory`/`--cpus`) inside nested containers are not enforced (cgroup v2 constraint) — see [docs/deployment.md](docs/deployment.md) § In-container podman |
 | dsh | Built from the official source tag into `/opt/deepseek-harness` (`DSH_TAG` pinnable); no runtime auto-update |
+| Bundled plugins | Four pinned dsh plugins ship with the image (`/opt/dsh-plugins`) but start **disabled**: they are registered in the `web` profile as installed dependencies only, and you switch each on under Settings → Plugins (no download). Details in [docs/deployment.md](docs/deployment.md) § Bundled dsh plugins |
+| SSH (opt-in) | `openssh-server` plus a self-contained key-only config; the daemon starts only with `DSH_SSH_ENABLED`, and host keys are generated into the volume (never baked in) — see [docs/security.md](docs/security.md) § SSH access |
 | Exposure | Caddy reverse proxy (`0.0.0.0:3081` → dsh's `127.0.0.1:3080`) with optional basic auth |
 | Supervisor | `dsh web` auto-restarts on exit; `docker exec dsh dsh-restart` restarts it manually |
 | Remote compatibility | One container-adapt plugin (`container/plugin/`, mounted via `dsh --patch`): session-cookie bootstrap inside dsh, headless-hostile "Open config file" button hidden (`describe` reports no local document), upstream's `__DSH_TRANSPORT__` transport-owner declaration injected into the served index (remote settings/credentials), and `/container-assets/*` serving the build-time-extracted images |
@@ -117,6 +119,8 @@ WebSocket headers and raised timeouts) — see [docs/deployment.md](docs/deploym
 |---|---|---|
 | `DSH_PROXY_USER` / `DSH_PROXY_PASSWORD` | *(empty)* | Basic auth on the exposed proxy (recommended for any non-loopback deployment); set both or neither |
 | `DSH_TELEMETRY_MODE` | `DISABLED` | OTel feedback-upload policy; `FEEDBACK_ONLY` restores the upstream default (uploads on explicit feedback), `DISABLED` keeps the OTel path local. It does **not** control the DeepSeek session-log contributor ([security.md](docs/security.md)) |
+| `DSH_SSH_ENABLED` | *(unset)* | Start the optional key-only SSH daemon (`1`/`true`/`yes`/`on`). `DSH_SSH_PORT` (default `22`) picks the in-container port, `DSH_SSH_AUTHORIZED_KEYS` injects public keys; without a key nobody can log in |
+| `DSH_SKIP_PLUGIN_SEED` | *(unset)* | `1` skips registering the bundled plugins into the web profile (they stay in `/opt/dsh-plugins`, unlisted) |
 
 Everything else uses built-in defaults — dsh data at `~/.dsh`, cwd `$HOME`, writable caches under
 `~/.cargo` / `~/.local/share`, image-owned tools in `/usr/local/bin` and `/opt/rust`. The whole

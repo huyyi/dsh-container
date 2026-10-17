@@ -210,17 +210,6 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: ${{ steps.args.outputs.args }}
 
-      # 冒烟测试已抽到 tests/smoke.sh(image.yml 与 release-prep.yml 共用,
-      # 本地可用 just test 运行); 发布构建额外校验 dsh 版本与 tag 一致。
-      - name: Smoke test
-        run: |
-          args=()
-          if [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" == dsh-v* ]]; then
-            args+=(--expect-dsh-version "${GITHUB_REF_NAME#dsh-v}")
-          fi
-          tests/smoke.sh "${{ steps.image.outputs.name }}:${{ github.sha }}" ${args+"${args[@]}"}
-
-      # 冒烟通过后才把 amd64 镜像按 digest 推到 GHCR(不打版本 tag):
       # arm64 由原生 runner 并行构建, 最后由 merge job 合并为多架构镜像
       # 并统一打 dsh-v* + <sha> + latest。坏镜像不会拿到任何 tag。
       - name: Push linux/amd64 by digest (release only)

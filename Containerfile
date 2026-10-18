@@ -262,9 +262,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #    subuid/subgid 必须幂等: Debian 的 useradd 建用户时会自动分配从属 ID 区间,
 #    再无条件 echo 一行会得到重复项 —— newuidmap 据此构造出重叠映射, 内核以
 #    Invalid argument 拒绝写入 uid_map, rootless podman 连用户命名空间都建不了。
+#    密码字段用 '*' 而不是 useradd 默认的 '!': sshd 在 UsePAM no 时把 '!' 开头的
+#    账户视为 locked, 连公钥登录都会被拒("account is locked"); '*' 同样没有可用
+#    密码(密码登录已由 sshd_config 关闭), 但不触发该检查。
 # ---------------------------------------------------------------------------
 RUN groupadd --gid $USER_GID $USERNAME \
-    && useradd --uid $USER_UID --gid $USER_GID -m -s /bin/bash $USERNAME \
+    && useradd --uid $USER_UID --gid $USER_GID -m -s /bin/bash -p '*' $USERNAME \
     && usermod -aG sudo $USERNAME \
     && echo '%sudo ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME \

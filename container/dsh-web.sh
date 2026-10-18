@@ -141,25 +141,54 @@ prepare_sshd() {
     echo "[dsh-web] cannot create /run/sshd (passwordless sudo is required for SSH)" >&2
     return 1
   fi
-  # 逐把生成缺失的主机密钥: 只在对应文件缺失时生成, 已存在的密钥绝不重写 ——
-  # 重写等于轮换主机密钥, 所有客户端都会拒绝连接。生成/属主/权限三步都显式检查:
-  # 本函数在 `if prepare_sshd && ...` 的条件上下文里调用, set -e 被挂起, 隐式失败
-  # 会被当成成功。
-  if ! sudo -n install -d -m 0700 -o root -g root "$SSH_HOST_KEY_DIR" 2>/dev/null; then
+  # 逐把生成缺失的主机密钥: 只在对应文件缺失(或已损坏)时生成, 可用的密钥绝不
+  # 重写 —— 重写等于轮换主机密钥, 所有客户端都会拒绝连接。生成/属主/权限三步都
+  # 显式检查: 本函数在 `if prepare_sshd && ...` 的条件上下文里调用, set -e 被
+  # 挂起, 隐式失败会被当成成功。
+  #
+  # 主机密钥目录属于 root 且 0700, 以 dsh 身份执行的 `test -e` 看不到里面的文件,
+  # 会把"已存在的密钥"误判为缺失; 接下来的 ssh-keygen 见到文件存在就转成交互式
+  # "Overwrite (y/n)?"(容器里 stdin 非交互 → 直接失败), 于是从第二次启动起 SSH
+  # 永远起不来。存在性检查因此也必须以 root 执行。
+  #
+  # $HOME/.ssh 必须是 dsh 自己的 0700: 旧实现用 `install -d` 建主机密钥目录, 而它
+  # 会把新建的中间目录(包括 .ssh)建成 root:root 0755, 于是 dsh 既写不了
+  # authorized_keys 也 chmod 不了, 带 DSH_SSH_AUTHORIZED_KEYS 启动直接失败。旧卷
+  # 已经被这样改坏, 这里显式修回属主与权限(只动目录本身, 不碰里面已有的文件)。
+  mkdir -p "$HOME/.ssh" || return 1
+  sudo -n chown "$(id -u):$(id -g)" "$HOME/.ssh" || return 1
+  chmod 700 "$HOME/.ssh" || return 1
+  # 主机密钥目录本身是 root 0700。不用 `install -d`: 它会连带调整新建父目录的
+  # 属主(见上), 而 mkdir+chown+chmod 只作用于这一个目录。
+  if ! sudo -n mkdir -p "$SSH_HOST_KEY_DIR" 2>/dev/null \
+    || ! sudo -n chown root:root "$SSH_HOST_KEY_DIR" 2>/dev/null \
+    || ! sudo -n chmod 0700 "$SSH_HOST_KEY_DIR" 2>/dev/null; then
     echo "[dsh-web] cannot prepare $SSH_HOST_KEY_DIR (needs passwordless sudo); SSH stays off" >&2
     return 1
   fi
-  local kt bits keyfile
+  local kt bits keyfile generate
   for kt in ed25519 rsa; do
     keyfile="$SSH_HOST_KEY_DIR/ssh_host_${kt}_key"
-    if [ ! -s "$keyfile" ]; then
+    generate=0
+    if ! sudo -n test -e "$keyfile" 2>/dev/null; then
+      generate=1
+    elif ! sudo -n ssh-keygen -y -f "$keyfile" </dev/null >/dev/null 2>&1; then
+      # 空文件/半截密钥(生成过程被中断)同样不可用: 删掉重建, 否则 sshd 起不来。
+      # 能从中导出公钥的私钥绝不删除, 客户端固定的主机身份保持不变。
+      echo "[dsh-web] SSH host key $keyfile is unusable; regenerating" >&2
+      sudo -n rm -f "$keyfile" "$keyfile.pub" || return 1
+      generate=1
+    fi
+    if [ "$generate" = "1" ]; then
       echo "[dsh-web] generating SSH host key ($kt) in $SSH_HOST_KEY_DIR" >&2
+      # stdin 一律接 /dev/null: 万一路径上仍出现已存在的文件, ssh-keygen 只会
+      # 失败, 不会把监督进程卡在交互式提问上。
       if [ "$kt" = "rsa" ]; then
         bits=3072
-        sudo -n ssh-keygen -q -t rsa -b "$bits" -N '' -f "$keyfile" \
+        sudo -n ssh-keygen -q -t rsa -b "$bits" -N '' -f "$keyfile" </dev/null \
           || { echo "[dsh-web] ssh-keygen failed for $keyfile" >&2; return 1; }
       else
-        sudo -n ssh-keygen -q -t "$kt" -N '' -f "$keyfile" \
+        sudo -n ssh-keygen -q -t "$kt" -N '' -f "$keyfile" </dev/null \
           || { echo "[dsh-web] ssh-keygen failed for $keyfile" >&2; return 1; }
       fi
     fi
@@ -190,11 +219,19 @@ prepare_sshd() {
 }
 
 start_sshd() {
-  # -o Port 覆盖配置里的 Port(命令行标量选项优先); -E 把 sshd 日志写文件,
-  # 排障时 docker exec 查看。sshd 自己 fork 到后台并写 $SSH_PIDFILE, 所以这里
-  # 不 tail、不 wait, 由监督循环重启。
-  : > "$SSH_LOG"
-  if ! sudo -n /usr/sbin/sshd -f /etc/ssh/sshd_config.dsh -E "$SSH_LOG" -o "Port=$SSH_PORT"; then
+  # -p 覆盖配置里的 Port: sshd 在给出命令行端口时明确忽略配置文件中的 Port;
+  # 用 -o Port= 反而会"追加"监听端口(22 与 DSH_SSH_PORT 同时监听), 与覆盖语义
+  # 不符。 -E 把 sshd 日志写文件, 排障时 docker exec 查看。日志文件必须由 root
+  # 创建且属于 root: 宿主机 fs.protected_regular=2(Ubuntu 默认)会拒绝 root 以
+  # O_CREAT 打开 /tmp 下属于 dsh 的文件, sshd 会以 "Couldn't open logfile ...
+  # Permission denied" 退出(由 dsh 预建文件同样不行)。sshd 自己 fork 到后台并
+  # 写 $SSH_PIDFILE, 所以这里不 tail、不 wait, 由监督循环重启。
+  if ! sudo -n rm -f "$SSH_LOG" \
+    || ! sudo -n install -m 0644 -o root -g root /dev/null "$SSH_LOG"; then
+    echo "[dsh-web] cannot create $SSH_LOG (needs passwordless sudo)" >&2
+    return 1
+  fi
+  if ! sudo -n /usr/sbin/sshd -f /etc/ssh/sshd_config.dsh -E "$SSH_LOG" -p "$SSH_PORT"; then
     echo "[dsh-web] sshd failed to start; log follows:" >&2
     cat "$SSH_LOG" >&2 2>/dev/null || true
     return 1

@@ -554,8 +554,9 @@ done
 "$DOCKER" exec "$ssh_cid" pgrep -x sshd >/dev/null 2>&1 \
   || { "$DOCKER" logs --tail 40 "$ssh_cid" >&2 || true; die "sshd did not start with DSH_SSH_ENABLED=1"; }
 # 主机密钥在数据卷路径上, 且必须是 root 属主 0600(root sshd 会拒绝其他属主)。
+# 目录本身是 root 0700, dsh 读不到它, 所以 stat 也要走免密 sudo。
 "$DOCKER" exec "$ssh_cid" sh -c \
-  '[ "$(stat -c %U:%a /home/dsh/.ssh/host/ssh_host_ed25519_key)" = "root:600" ]' \
+  '[ "$(sudo -n stat -c %U:%a /home/dsh/.ssh/host/ssh_host_ed25519_key)" = "root:600" ]' \
   || die "SSH host key is not root-owned 0600 inside the volume"
 if command -v ssh >/dev/null 2>&1; then
   ssh_login=""
@@ -577,7 +578,33 @@ if command -v ssh >/dev/null 2>&1; then
       dsh@127.0.0.1 true 2>/dev/null; then
     die "sshd accepted an unauthorized key (public-key-only auth is broken)"
   fi
-  echo "=== [smoke] SSH: authorized key logged in, unauthorized key rejected" >&2
+  # 重启回归: 主机密钥在卷里, 第二次启动必须复用它。旧实现以 dsh 身份检查 root
+  # 0700 目录里的密钥, 把已存在的密钥误判为缺失, 随后的 ssh-keygen 撞上
+  # "already exists" 的交互式提问 → SSH 从第二次启动起永久失败。
+  keygen_before="$("$DOCKER" logs "$ssh_cid" 2>&1 | grep -c 'generating SSH host key' || true)"
+  "$DOCKER" restart "$ssh_cid" >/dev/null || die "SSH container restart failed"
+  for _ in $(seq 1 90); do
+    "$DOCKER" exec "$ssh_cid" pgrep -x sshd >/dev/null 2>&1 && break
+    running "$ssh_cid" || { "$DOCKER" logs --tail 40 "$ssh_cid" >&2 || true; die "SSH container exited on restart"; }
+    sleep 1
+  done
+  "$DOCKER" exec "$ssh_cid" pgrep -x sshd >/dev/null 2>&1 \
+    || { "$DOCKER" logs --tail 40 "$ssh_cid" >&2 || true; die "sshd did not start after container restart"; }
+  keygen_after="$("$DOCKER" logs "$ssh_cid" 2>&1 | grep -c 'generating SSH host key' || true)"
+  [ "$keygen_before" = "$keygen_after" ] \
+    || { "$DOCKER" logs --tail 40 "$ssh_cid" >&2 || true; die "SSH host keys were regenerated on restart"; }
+  ssh_login=""
+  for _ in $(seq 1 30); do
+    ssh_login="$(ssh -i "$ssh_keydir/id_ed25519" -p 2222 \
+      -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 \
+      dsh@127.0.0.1 'id -un' 2>/dev/null || true)"
+    [ "$ssh_login" = "dsh" ] && break
+    sleep 1
+  done
+  [ "$ssh_login" = "dsh" ] \
+    || { "$DOCKER" logs --tail 40 "$ssh_cid" >&2 || true; die "SSH login failed after container restart (host key reuse / locked account)"; }
+  echo "=== [smoke] SSH: authorized key logged in, unauthorized key rejected, keys reused on restart" >&2
 else
   echo "=== [smoke] note: no ssh client on the host; skipped the real SSH login check" >&2
 fi

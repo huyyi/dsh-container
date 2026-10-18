@@ -153,7 +153,13 @@ The entrypoint (`container/entrypoint.sh`) does, in order:
    With `DSH_SSH_ENABLED` set it also starts and supervises sshd (`container/sshd_config` — a
    complete standalone config, key-only, no root login, no PAM, `sshd -f` so the distro config is
    never read); host keys are generated root-owned `0600` inside the volume at `$HOME/.ssh/host`,
-   an unusable daemon disables SSH but never the web stack, and a dead sshd is restarted.
+   an unusable daemon disables SSH but never the web stack, and a dead sshd is restarted. Three
+   non-obvious invariants live in that branch: the host-key directory is root `0700`, so the
+   "does the key exist / is it usable" checks run through `sudo` (a `test` as `dsh` always fails and
+   sends ssh-keygen into an interactive overwrite prompt), while `~/.ssh` itself must stay
+   `dsh`-owned `0700`; `DSH_SSH_PORT` is passed as `sshd -p` (`-o Port=` *adds* a listener next to
+   the config's `Port 22`); and the `dsh` account's password field is `*`, not `!`, because sshd with
+   `UsePAM no` refuses a locked account even for public-key logins.
 
 ### Hard constraints from upstream dsh (do not fight these)
 

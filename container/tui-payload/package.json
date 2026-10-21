@@ -1,0 +1,7 @@
+{
+  "name": "dsh-container-tui-payload",
+  "private": true,
+  "dependencies": {
+    "dsh-tui": "0.2.19"
+  }
+}

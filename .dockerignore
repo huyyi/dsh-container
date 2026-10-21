@@ -1,0 +1,6 @@
+.git
+**/node_modules
+**/.pnpm-store
+examples/**/data
+examples/**/home
+**/__pycache__

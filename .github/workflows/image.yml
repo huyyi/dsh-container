@@ -170,24 +170,23 @@ jobs:
         id: image
         run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      # 本仓库 release tag 与官方仓库 tag 完全一致(如 dsh-v0.1.2-alpha.3);
-      # DSH_TAG 与 BUILD_VERSION 都直接使用该 tag。非发布构建 label 为 latest。
+      # 默认基础镜像由 Containerfile 的摘要锁定；可显式覆盖完整镜像引用。
       - name: Compute build args
         id: args
         env:
-          DSH_TAG_REPO: ${{ vars.DSH_TAG || 'latest' }}
+          BASE_IMAGE_OVERRIDE: ${{ vars.BASE_IMAGE }}
         run: |
-          dsh_tag="$DSH_TAG_REPO"
           label="latest"
           if [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" == dsh-v* ]]; then
-            dsh_tag="${{ github.ref_name }}"
             label="${{ github.ref_name }}"
           fi
           {
             echo "BUILD_GIT_SHA=${{ github.sha }}"
             echo "BUILD_GIT_REF=${{ github.ref_name }}"
             echo "BUILD_VERSION=$label"
-            echo "DSH_TAG=$dsh_tag"
+            if [ -n "$BASE_IMAGE_OVERRIDE" ]; then
+              echo "BASE_IMAGE=$BASE_IMAGE_OVERRIDE"
+            fi
           } > /tmp/build-args.txt
           {
             echo "args<<EOF"
@@ -209,6 +208,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: ${{ steps.args.outputs.args }}
+
+      - name: Verify inherited runtime, A2A bundle and TUI client
+        run: bash tests/extensions.sh '${{ steps.image.outputs.name }}:${{ github.sha }}'
 
       # arm64 由原生 runner 并行构建, 最后由 merge job 合并为多架构镜像
       # 并统一打 dsh-v* + <sha> + latest。坏镜像不会拿到任何 tag。
@@ -258,19 +260,19 @@ jobs:
       - name: Compute build args
         id: args
         env:
-          DSH_TAG_REPO: ${{ vars.DSH_TAG || 'latest' }}
+          BASE_IMAGE_OVERRIDE: ${{ vars.BASE_IMAGE }}
         run: |
-          dsh_tag="$DSH_TAG_REPO"
           label="latest"
           if [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" == dsh-v* ]]; then
-            dsh_tag="${{ github.ref_name }}"
             label="${{ github.ref_name }}"
           fi
           {
             echo "BUILD_GIT_SHA=${{ github.sha }}"
             echo "BUILD_GIT_REF=${{ github.ref_name }}"
             echo "BUILD_VERSION=$label"
-            echo "DSH_TAG=$dsh_tag"
+            if [ -n "$BASE_IMAGE_OVERRIDE" ]; then
+              echo "BASE_IMAGE=$BASE_IMAGE_OVERRIDE"
+            fi
           } > /tmp/build-args.txt
           {
             echo "args<<EOF"

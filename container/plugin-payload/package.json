@@ -3,6 +3,7 @@
   "private": true,
   "description": "Image-owned dsh plugin payload: code only, installed at /opt/dsh-plugins. Enabling a plugin is a per-profile user action (see container/dsh-plugins-seed.sh).",
   "dependencies": {
+    "@ryubyte/dsh-a2a": "0.3.1",
     "@changfenhuang/dsh-genui": "0.12.0",
     "@linxin666/dsh-client-ui-skill-explorer": "0.4.6",
     "dsh-plugin-guide": "0.3.33",

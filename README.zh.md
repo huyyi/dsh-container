@@ -16,6 +16,16 @@
 
 ## 快速开始
 
+本分支基于 `ghcr.io/niyueee/dsh-container:dsh-v0.2.1-rc.2` 构建派生镜像，并锁定多架构摘要。
+新增 `@ryubyte/dsh-a2a@0.3.1`（预装，在设置 → 插件中手动启用）和
+`dsh-tui@0.2.19`（独立终端客户端，不是 web bundle）。
+TUI 安装已验证，但该版本的 RPC 协议与固定宿主不兼容（`session.list` 返回 404）；
+这个经过测试的组合尚不支持交互使用。
+镜像不包含模型凭据。构建与验证方法见 [derived-image.md](docs/derived-image.md)。
+下方部署示例仍拉取上游镜像，并非本分支构建的镜像。
+已发布的基础镜像使用 Debian 13，不包含下方旧源码构建说明中的可选 SSH 服务；
+本分支以派生镜像指南为准。
+
 ### Docker Compose(Linux)
 
 ```bash
@@ -39,7 +49,7 @@ sudo systemctl enable --now dsh.service
 
 | 组件 | 说明 |
 |---|---|
-| 基础镜像 | `debian:12-slim`(bookworm;已钉版本,可用 `BASE_IMAGE` 构建参数覆盖) |
+| 基础镜像 | `ghcr.io/niyueee/dsh-container:dsh-v0.2.1-rc.2`（摘要锁定；底层为 Debian 13） |
 | 工具链 | Node.js 22 LTS、pnpm、uv、Rust/cargo(含 rustfmt/clippy)、git + git-lfs、build-essential、Caddy、podman 4.3 + crun、gh、yq——镜像持有的真实二进制,随镜像升级 |
 | agent 常用工具 | ripgrep、fd、python3、zip、openssh-client、tmux、sqlite3、vim.tiny/nano、less、rsync、wget、tree、htop、tzdata、patch,外加一组诊断工具(dig/nc/socat/traceroute/iperf3、file、ncdu、strace、zstd/lz4、bc、moreutils、pv、uuid-runtime)与 `shellcheck`——全部烘干进系统层,全新容器开箱即用、无需重新下载(运行期 `apt install` 会随容器重建丢失)。不含 `just`:bookworm 没有该包 |
 | 嵌套容器 | 容器内( rootless )podman 已预配置 `XDG_RUNTIME_DIR`、subuid/subgid 与网络/sysctl 默认值;宿主运行时需允许非特权用户命名空间 + `/dev/fuse` + `/dev/net/tun`,且不得对容器的 `/proc` 加 masked/只读子挂载(`--security-opt unmask=ALL`、Quadlet `Unmask=ALL`、Docker `systempaths=unconfined`);嵌套容器内的资源限制(`--memory`/`--cpus`)不生效(cgroup v2 约束)——见 [docs/deployment.md](docs/deployment.md) § In-container podman |

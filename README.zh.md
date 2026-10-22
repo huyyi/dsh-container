@@ -1,112 +1,56 @@
-<div align="center">
+# 带 A2A 和 TUI 的 dsh 容器
 
-# dsh Container Image
+基于 `ghcr.io/niyueee/dsh-container` 的轻量派生镜像。在 [Containerfile](Containerfile)
+中固定基础镜像版本和多架构摘要；本仓库不再编译 DeepSeek Harness。
 
-**[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)(`dsh`)的开箱即用容器——agent、完整工具链与反向代理集成于一个镜像,基于官方源码 tag 构建。**
+[English](README.md)
 
-[![Release](https://img.shields.io/github/v/tag/NIyueeE/dsh-container?filter=dsh-v*&label=release&sort=semver)](https://github.com/NIyueeE/dsh-container/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/NIyueeE/dsh-container/image.yml?branch=main&label=CI)](https://github.com/NIyueeE/dsh-container/actions/workflows/image.yml)
-[![GHCR](https://img.shields.io/badge/ghcr.io-niyueee%2Fdsh--container-2088FF?logo=docker&logoColor=white)](https://github.com/NIyueeE/dsh-container/pkgs/container/dsh-container)
-[![Upstream dsh](https://img.shields.io/github/v/tag/deepseek-ai/deepseek-harness?filter=dsh-v*&label=upstream%20dsh&sort=semver)](https://github.com/deepseek-ai/deepseek-harness)
-[![License](https://img.shields.io/github/license/NIyueeE/dsh-container)](LICENSE)
+## 内置扩展
 
-[English](README.md) | 中文
+- `@ryubyte/dsh-a2a@0.3.1`：预装到镜像，登记到 web profile，默认不启用。
+- `dsh-tui@0.2.19`：依赖隔离的独立终端客户端。
+- 保留原有固定版本的插件载荷。
 
-</div>
+**已知限制：** TUI 安装及帮助/版本命令可用，但其旧版 `session.list` 协议与基础镜像
+的 `session/list` 不兼容（HTTP 404），交互支持尚未完成。
+A2A 的发现、认证和离线启用已纳入测试。
 
-## 快速开始
+## 运行
 
-本分支基于 `ghcr.io/niyueee/dsh-container:dsh-v0.2.1-rc.2` 构建派生镜像，并锁定多架构摘要。
-新增 `@ryubyte/dsh-a2a@0.3.1`（预装，在设置 → 插件中手动启用）和
-`dsh-tui@0.2.19`（独立终端客户端，不是 web bundle）。
-TUI 安装已验证，但该版本的 RPC 协议与固定宿主不兼容（`session.list` 返回 404）；
-这个经过测试的组合尚不支持交互使用。
-镜像不包含模型凭据。构建与验证方法见 [derived-image.md](docs/derived-image.md)。
-下方部署示例仍拉取上游镜像，并非本分支构建的镜像。
-已发布的基础镜像使用 Debian 13，不包含下方旧源码构建说明中的可选 SSH 服务；
-本分支以派生镜像指南为准。
+main 首次成功发布后：
 
-### Docker Compose(Linux)
-
-```bash
-docker compose -f examples/compose.yaml up -d
-docker compose logs dsh | grep 'dsh web:'
-# open http://127.0.0.1:3081/ in your local browser (the proxy bootstraps the login)
+```sh
+docker run -d --name dsh -p 127.0.0.1:3081:3081 \
+  -v dsh-home:/home/dsh ghcr.io/huyyi/dsh-container:latest
+docker exec dsh dsh-tui --version
 ```
 
-### Podman Quadlet(Linux,推荐)
+打开 http://127.0.0.1:3081 并配置模型。在设置 → 插件中启用 A2A，然后配置远端或入站服务。
+镜像不包含模型凭据。现有 Compose 和多智能体示例保留自己的镜像引用，
+不会自动切换到此派生镜像。
 
-```bash
-sudo mkdir -p /etc/containers/systemd
-sudo cp examples/dsh.container /etc/containers/systemd/
-sudo systemctl daemon-reload
-sudo systemctl enable --now dsh.service
+## 构建与发布
+
+```sh
+docker build -f Containerfile -t dsh-a2a-tui:local .
+bash tests/extensions.sh dsh-a2a-tui:local
+python3 -m unittest discover -s tests -p 'test_*.py'
+python3 tests/validate-docs.py
 ```
 
-两个示例都发布 `127.0.0.1:3081`,并把一个卷挂载到 `/home/dsh`——用户层(`~/.dsh`、缓存、自装工具)在镜像升级后保持不变,系统层随镜像更新。没有登录步骤:代理会自动完成 dsh 会话引导。
-
-## 镜像内容
-
-| 组件 | 说明 |
-|---|---|
-| 基础镜像 | `ghcr.io/niyueee/dsh-container:dsh-v0.2.1-rc.2`（摘要锁定；底层为 Debian 13） |
-| 工具链 | Node.js 22 LTS、pnpm、uv、Rust/cargo(含 rustfmt/clippy)、git + git-lfs、build-essential、Caddy、podman 4.3 + crun、gh、yq——镜像持有的真实二进制,随镜像升级 |
-| agent 常用工具 | ripgrep、fd、python3、zip、openssh-client、tmux、sqlite3、vim.tiny/nano、less、rsync、wget、tree、htop、tzdata、patch,外加一组诊断工具(dig/nc/socat/traceroute/iperf3、file、ncdu、strace、zstd/lz4、bc、moreutils、pv、uuid-runtime)与 `shellcheck`——全部烘干进系统层,全新容器开箱即用、无需重新下载(运行期 `apt install` 会随容器重建丢失)。不含 `just`:bookworm 没有该包 |
-| 嵌套容器 | 容器内( rootless )podman 已预配置 `XDG_RUNTIME_DIR`、subuid/subgid 与网络/sysctl 默认值;宿主运行时需允许非特权用户命名空间 + `/dev/fuse` + `/dev/net/tun`,且不得对容器的 `/proc` 加 masked/只读子挂载(`--security-opt unmask=ALL`、Quadlet `Unmask=ALL`、Docker `systempaths=unconfined`);嵌套容器内的资源限制(`--memory`/`--cpus`)不生效(cgroup v2 约束)——见 [docs/deployment.md](docs/deployment.md) § In-container podman |
-| dsh | 从官方源码 tag 构建至 `/opt/deepseek-harness`(`DSH_TAG` 可钉版本);运行期无自动更新 |
-| 自带插件 | 四个钉版本的 dsh 插件随镜像发布(`/opt/dsh-plugins`),但**默认不启用**:只在 web profile 里登记为已安装依赖,由你在 设置 → 插件管理器 里逐个开启(无需下载)。细节见 [docs/deployment.md](docs/deployment.md) § Bundled dsh plugins |
-| SSH(可选) | `openssh-server` 与一份自包含的仅公钥配置;只有设置 `DSH_SSH_ENABLED` 才启动,主机密钥在数据卷内生成(绝不烘进镜像)——见 [docs/security.md](docs/security.md) § SSH access |
-| 暴露方式 | Caddy 反向代理(`0.0.0.0:3081` → dsh 的 `127.0.0.1:3080`),可选 basic auth |
-| 守护 | `dsh web` 退出自动重启;`docker exec dsh dsh-restart` 手动重启 |
-| 远程兼容 | 一个容器适配插件(`container/plugin/`,经 `dsh --patch` 挂载):dsh 进程内会话 cookie 自举、无桌面环境下隐藏"打开配置文件"按钮(`describe` 报告无本地文档)、往服务端索引注入上游的 `__DSH_TRANSPORT__` 传输层归属声明(远程设置/凭据页可用)、`/container-assets/*` 提供构建期抽出的图片 |
-| 可观测性 | OCI labels、`HEALTHCHECK`(curl 3080 + 3081) |
-| 运行用户 | uid 1000(`dsh`),免密 sudo;`/home/dsh` 为持久化用户层 |
-
-## 容器适配插件
-
-对上游 dsh 的全部容器侧适配收敛在**一个 Cordis 插件**里,随镜像装在
-`/opt/dsh-container-plugin`,经 `dsh --patch` 挂载进 web profile:
-
-- **会话 cookie 自举** —— 插件在 dsh 进程内兑换一次性登录 token,写出 cookie 供代理注入;浏览器不会接触 token。
-- **隐藏"打开配置文件"按钮** —— 上游该操作没有无桌面兜底,在容器里会 spawn `xdg-open` 扑空;插件让 `settings/describe` 报告 `hasDocument: false`,按钮按上游自身 UI 逻辑不再渲染。设置项持久化在挂载卷的 `~/.dsh` 下(上游 v0.1.7+ 按 profile 存于 `~/.dsh/profiles/<profile>/cordis.patch.yml`;旧版 `settings.yaml` 只导入一次)。
-- **传输层归属声明** —— 除非某个 shell 声明自己拥有 Host,上游浏览器代码会按 `location.hostname` 判断 `isLoopback`。插件向上游的**结构化索引注入表**推一行 `__DSH_TRANSPORT__ = { ownsHost: true }`(与上游桌面 shell、worker 预览页同款声明),设置/凭据页因此可经代理使用,且**完全不改上游构建产物**。
-- **产物后处理** —— `pnpm run build:official` 之后跑三步:≥ 100 KiB 的内联图片抽成 `/container-assets/<内容哈希>`(由插件以 `immutable` 提供,只在真正打开对应界面时才取)、客户端 bundle 用 esbuild 压缩、刷新 `.dsh-build` 构建记录使其继续与交付产物一致。
-
-插件是唯一的适配维护点。上游若新增 API 使其中一部分冗余,发布流水线会自动删除对应部分(体现在该次发布的 commit 列表中,见 [docs/upstream-contract.md](docs/upstream-contract.md) § 简化触发器)。
-
-## 网络与安全
-
-- **端口模型**——`dsh web` 监听 `127.0.0.1:3080`(上游拒绝 `--host 0.0.0.0`);对外端口是 `3081`,示例默认发布在宿主回环地址。
-- **代理即安全边界**——Caddy 把 `Host`/`Origin` 改写为回环,远程浏览器因此通过 dsh 的 `/api` 信任围栏,包括原本仅限回环的设置/凭据接口。任何能访问 `3081` 的人都获得完全控制:请启用 basic auth(`DSH_PROXY_USER`/`DSH_PROXY_PASSWORD`,成对设置,否则守护脚本 dsh-web 拒绝启动)并保持端口防火墙关闭。
-- **会话自动引导**——容器适配插件在 dsh 进程内兑换一次性登录 token(启动时),代理再把会话 cookie 注入每个请求;浏览器不会接触 token。
-- **流、体积与缓存**——SSE/WebSocket 无缓冲直通(已对 Caddy 2.6 验证),dsh 的 2 秒心跳可穿过该跳。客户端 bundle 在构建期做了后处理,无头浏览器实测冷启动整页约 **1.6 MiB(线上字节)** 而非约 5.8 MiB:57 模块合并包从 5.06 MiB 降到约 1.0 MiB gzip(≥ 100 KiB 的内联图片被抽出,只在打开对应界面时才取;bundle 只压空白与语法,不改标识符)。索引 `no-store`,内容哈希的 `/assets/*` 由代理标 `immutable`,重复访问因此很便宜。
-- **遥测默认关闭** —— entrypoint 设置 `DSH_TELEMETRY_MODE=DISABLED`,OTel 反馈上报在你显式打开前不会发送任何内容。与之独立的是上游的 DeepSeek 会话日志贡献者,它**默认开启**,会把会话日志后缀附加到 DeepSeek API 请求上——发送内容与关闭方式见 [docs/security.md](docs/security.md)。
-- **附加参数**——通过容器 command 透传 `dsh web` 参数,例如 `["--port", "8080"]`(仅改内部端口;对外端口仍为 `3081`)。
-
-广域网访问请在前置代理上终结 TLS(文档含可用的 nginx 配置,含 WebSocket 头与超时设置)——详见 [docs/deployment.md](docs/deployment.md) 与 [docs/security.md](docs/security.md)。
-
-## 环境变量
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `DSH_PROXY_USER` / `DSH_PROXY_PASSWORD` | *(空)* | 对外代理的 basic auth(任何非回环部署都建议启用);成对设置或都不设 |
-| `DSH_TELEMETRY_MODE` | `DISABLED` | OTel 反馈上报策略;`FEEDBACK_ONLY` 恢复上游默认(显式反馈时上传),`DISABLED` 让 OTel 路径留在本地。它**不**控制 DeepSeek 会话日志贡献者([security.md](docs/security.md)) |
-| `DSH_SSH_ENABLED` | *(空)* | 启动可选的仅公钥 SSH 服务端(`1`/`true`/`yes`/`on`)。`DSH_SSH_PORT`(默认 `22`)指定容器内端口,`DSH_SSH_AUTHORIZED_KEYS` 投放公钥;没有公钥时任何人都无法登录 |
-| `DSH_SKIP_PLUGIN_SEED` | *(空)* | `1` 跳过把自带插件登记进 web profile(它们仍留在 `/opt/dsh-plugins`,只是不列出) |
-
-其余全部使用内置默认值——dsh 数据在 `~/.dsh`,工作目录 `$HOME`,可写缓存在 `~/.cargo` / `~/.local/share`,镜像持有的工具在 `/usr/local/bin` 与 `/opt/rust`。整个 `/home/dsh` 是持久化边界:把它作为单一卷挂载;镜像升级替换工具链,从不动数据。细节见 [docs/build.md](docs/build.md) 与 [docs/deployment.md](docs/deployment.md)。
+main 每次 push 都构建、测试并发布 amd64/arm64 镜像，包括纯文档更新。
+标签由固定的上游版本和提交哈希前七位组成，例如 `dsh-v0.2.1-rc.2-cf05a2f`；
+成功发布时同时更新 `latest`。PR 不发布，只有 Markdown/LICENSE 改动时跳过镜像构建；
+无法判断 diff 时执行构建。手动触发只验证，不创建 Git tag 或 GitHub Release。
 
 ## 文档
 
-| 文档 | 内容 |
-|---|---|
-| [docs/deployment.md](docs/deployment.md) | 部署与维护:Compose、Quadlet、远程访问、离线使用、FAQ |
-| [docs/security.md](docs/security.md) | 安全说明:网络暴露取舍、凭据、可信工作负载 |
-| [docs/build.md](docs/build.md) | 构建配置:构建参数、源码版本钉定、可复现构建 |
-| [docs/releasing.md](docs/releasing.md) | 发布自动化:上游 tag 监视、契约检查、agent 修复、自动发布 |
-| [docs/upstream-contract.md](docs/upstream-contract.md) | 本镜像依赖的上游行为,以及漂移的检测方式 |
-| [docs/development.md](docs/development.md) | 目录结构与本地开发 |
+- [构建](docs/build.md)
+- [部署](docs/deployment.md)
+- [安全](docs/security.md)
+- [发布](docs/releasing.md)
+- [开发](docs/development.md)
+- [扩展说明](docs/derived-image.md)
 
-## 许可证
-
-[MIT](LICENSE)
+运行时、代理和工具链均继承基础镜像。本仓库只维护扩展打包、登记和验证，
+已移除旧源码构建适配代码。

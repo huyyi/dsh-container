@@ -6,7 +6,7 @@ build_format := if container == "podman" { "--format docker" } else { "" }
 # 本地构建镜像(不推送)。podman 必须用 --format docker 保留 HEALTHCHECK
 # (podman 默认 OCI 格式会丢弃 HEALTHCHECK); docker 不支持该 flag, 因此条件传入。
 build:
-    {{container}} build {{build_format}} -t ghcr.io/niyueee/dsh-container:local .
+    {{container}} build {{build_format}} -f Containerfile -t ghcr.io/niyueee/dsh-container:local .
 
 # 前台调试运行(回环端口映射, 与 examples 一致 —— 局域网暴露是显式
 # 的 -p 3081:3081 改绑动作; --rm 退出后用户层改动随容器丢弃)
@@ -20,7 +20,7 @@ restart-dsh:
 
 # 对已构建镜像跑冒烟测试(先 just build; DOCKER 已按 podman/docker 自动选择)
 test image="ghcr.io/niyueee/dsh-container:local":
-    DOCKER={{container}} tests/smoke.sh {{image}}
+    DOCKER={{container}} bash tests/extensions.sh {{image}}
 
 # 对上游 tag 跑契约静态检查(浅克隆上游, 数秒判定兼容漂移;
 # 本地已有 checkout 时直接调 tests/contract.sh --tag X --dir PATH 更快)

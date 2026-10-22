@@ -17,6 +17,16 @@ English | [中文](README.zh.md)
 
 ## Quick start
 
+This fork builds a derived image from `ghcr.io/niyueee/dsh-container:dsh-v0.2.1-rc.2`, pinned by
+multi-architecture digest. It adds `@ryubyte/dsh-a2a@0.3.1` (installed, disabled until enabled in
+Settings → Plugins) and `dsh-tui@0.2.19` (a standalone terminal client, not a web bundle).
+TUI installation is verified, but this release's RPC protocol is incompatible with the pinned
+host (`session.list` returns 404); interactive use is not supported by this tested combination.
+No model credentials are baked in. See [derived-image.md](docs/derived-image.md) for build and test
+instructions. The deployment examples below still pull the upstream image, not this fork's build.
+The published base uses Debian 13 and does not include the optional SSH server described in the
+legacy source-build sections below; the derived-image guide takes precedence for this fork.
+
 ### Docker Compose (Linux)
 
 ```bash
@@ -42,7 +52,7 @@ the image. There is no login step: the proxy bootstraps the dsh session automati
 
 | Component | Description |
 |---|---|
-| Base image | `debian:12-slim` (bookworm; pinned, overridable via the `BASE_IMAGE` build arg) |
+| Base image | `ghcr.io/niyueee/dsh-container:dsh-v0.2.1-rc.2` (digest-pinned; Debian 13 underneath) |
 | Toolchain | Node.js 22 LTS, pnpm, uv, Rust/cargo (+ rustfmt/clippy), git + git-lfs, build-essential, Caddy, podman 4.3 + crun, gh, yq — image-owned real binaries, upgraded with the image |
 | Agent CLI tools | ripgrep, fd, python3, zip, openssh-client, tmux, sqlite3, vim.tiny/nano, less, rsync, wget, tree, htop, tzdata, patch, plus a diagnostics set (dig/nc/socat/traceroute/iperf3, file, ncdu, strace, zstd/lz4, bc, moreutils, pv, uuid-runtime) and `shellcheck` — baked into the system layer, so a fresh container never re-downloads them (runtime `apt install` would be lost on recreation). `just` is not included: bookworm does not package it |
 | Nested containers | podman in-container (rootless) with `XDG_RUNTIME_DIR`, subuid/subgid and the network/sysctl defaults preconfigured; the host runtime must allow unprivileged user namespaces + `/dev/fuse` + `/dev/net/tun` and must not mask the container's `/proc` (`--security-opt unmask=ALL`, Quadlet `Unmask=ALL`, Docker `systempaths=unconfined`); resource limits (`--memory`/`--cpus`) inside nested containers are not enforced (cgroup v2 constraint) — see [docs/deployment.md](docs/deployment.md) § In-container podman |

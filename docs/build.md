@@ -1,5 +1,9 @@
 # Build Configuration & Version Pinning
 
+**Fork note:** the root Containerfile now builds a derived image. See
+[Derived image: A2A and TUI](derived-image.md) for the active build instructions. The source-build
+details below document the inherited upstream image and are not executed by this fork's build.
+
 The base image is pinned by default, and the dsh source tag / Rust toolchain / uv version can be
 pinned with `--build-arg`. uv is installed by the official standalone installer script (the same
 pattern as rustup; `UV_VERSION` pins it, `latest` resolves the newest release at build time); pnpm

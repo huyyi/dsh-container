@@ -3,369 +3,147 @@ name: Image
 on:
   push:
     branches: [main]
-    tags: ['dsh-v*']
   pull_request:
   workflow_dispatch:
 
-# 所有 dsh-v* tag 构建共用同一个并发组, 串行推送, 避免两个 tag 并发时竞争
-# latest; 非 tag 构建仍按 ref 隔离。
+# main 发布串行，避免并发覆盖 latest；PR 按分支隔离。
 concurrency:
-  group: image-${{ startsWith(github.ref, 'refs/tags/dsh-v') && 'release' || github.ref }}
+  group: image-${{ github.ref }}
   cancel-in-progress: false
 
-# 默认只读; 需要写权限的 job 单独声明
 permissions:
   contents: read
 
 jobs:
   validate:
-    name: Validate scripts and examples
     runs-on: ubuntu-latest
     outputs:
-      docs_only: ${{ steps.docs.outputs.docs_only }}
+      build: ${{ steps.meta.outputs.build }}
+      publish: ${{ steps.meta.outputs.publish }}
+      base_image: ${{ steps.meta.outputs.base_image }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+      image: ${{ steps.meta.outputs.image }}
     steps:
-      # fetch-depth 0: 快车道判定要比较 push 前后的真实 diff(浅克隆没有 base 对象,
-      # 判定会退化为"需要构建", 只是慢, 不会误判为纯文档)。
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
-      # 脚本门禁分两层: bash -n 只查语法, shellcheck 才查真 bug(引号/未定义变量/
-      # 子 shell 陷阱)。--severity=warning: info 级里混有大量合法误报(例如
-      # dsh-web 的 cleanup() 只经 trap 调用), 那类已在脚本内用定向 disable 注释
-      # 显式标注, 所以这里可以对 warning 级保持"零容忍"。runner 自带 shellcheck,
-      # 无需安装; 本地等价命令是 `just lint`。
-      - name: Shell syntax and lint check
+      - name: Validate scripts, docs and CI rules
         run: |
-          set -euo pipefail
           bash -n container/*.sh tests/*.sh
-          shellcheck --severity=warning container/*.sh tests/*.sh
-
-      # 纯文档提交的安全快车道: 只改 *.md / LICENSE 时跳过镜像构建 + 冒烟
-      # (省 ~15 分钟), 其余校验照跑。判定完全基于真实 diff, 并且 fail closed:
-      # 判定不了(before 缺失/force push/浅克隆/workflow_dispatch)就按需要构建
-      # 处理; dsh-v* tag 构建永远走完整路径。examples/ 与 .github/ 不在白名单里,
-      # 它们会影响部署或 CI 本身。
-      - name: Classify change (docs-only fast lane)
-        id: docs
+          shellcheck container/*.sh tests/*.sh
+          python3 tests/validate-docs.py
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          docker compose -f examples/compose.yaml config --quiet
+      - name: Classify changes and resolve pinned version
+        id: meta
         env:
           EVENT: ${{ github.event_name }}
-          REF_TYPE: ${{ github.ref_type }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
           BEFORE: ${{ github.event.before }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          docs_only=false
-          files=""
-          if [ "$REF_TYPE" != "tag" ]; then
-            if [ "$EVENT" = "push" ] && [ -n "$BEFORE" ] \
-                && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
-              files="$(git diff --name-only "$BEFORE" "$GITHUB_SHA")"
-            elif [ "$EVENT" = "pull_request" ] && [ -n "$PR_BASE" ]; then
-              files="$(git diff --name-only "$PR_BASE" "$GITHUB_SHA")"
-            fi
-            if [ -n "$files" ] && ! grep -qvE '^(.*\.md|LICENSE)$' <<<"$files"; then
-              docs_only=true
-            fi
-          fi
-          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
-          {
-            echo "### Change classification"
-            echo
-            echo "- docs-only: \`$docs_only\` (image build + smoke are skipped when true)"
-            echo "- changed files:"
-            echo '```'
-            printf '%s\n' "${files:-<not derivable — full build>}"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$docs_only" = true ]; then
-            echo "docs-only change: image build + smoke skipped; validation still runs"
-          else
-            echo "non-doc (or undecidable) change: full image build + smoke"
-          fi
+          REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/image_metadata.py >> "$GITHUB_OUTPUT"
 
-      # 文档改动也得有门禁: 相对链接必须能在仓库里解析(文档是用户唯一的部署参考)。
-      # 判据抽到 tests/validate-docs.py —— 纯 stdlib, 本地 `just lint` 跑同一套。
-      - name: Doc links resolve
-        run: python3 tests/validate-docs.py links
-
-      - name: No removed auto-update remnants
-        run: |
-          set -euo pipefail
-          if grep -RIn --exclude-dir=.git --exclude='image.yml' \
-               -E 'DSH_AUTO_UPDATE|dsh-update|update-dsh|DSH_VERSION|@deepseek-ai/dsh@' .; then
-            echo "found references to removed dsh auto-update / npm install" >&2
-            exit 1
-          fi
-          if grep -nE 'DSH_AUTO_UPDATE[ =:]|dsh-update\.sh|update-dsh[ :]|DSH_VERSION[ =:]' .github/workflows/image.yml; then
-            echo "workflow still references removed dsh auto-update / npm install" >&2
-            exit 1
-          fi
-
-      # README.zh 必须与 README.md 结构一致(标题/链接/代码围栏计数), 只译散文。
-      # 同一判据也在 tests/validate-docs.py 里, 本地 `just lint` 可先跑。
-      - name: README parity
-        run: python3 tests/validate-docs.py parity
-
-      - name: container-adapt plugin contract (transport injection + extracted-asset route)
-        run: |
-          set -euo pipefail
-          # 纯 node、无依赖: 断言 __DSH_TRANSPORT__ 注入的位置契约(紧跟 <head>,
-          # 先于 shell 的 module script)与 /container-assets 路由行为(immutable、
-          # 拒绝路径穿越与未知名)。真实镜像上的端到端断言在 tests/smoke.sh。
-          node tests/plugin-unit.mjs
-          # 构建期后处理脚本的语法; 真正执行需要完整 dsh checkout 与 esbuild,
-          # 由镜像构建(Containerfile 第 10 步)与 smoke 断言覆盖。
-          node --check container/plugin/index.js
-          node --check container/plugin/scripts/extract-inline-assets.js
-          node --check container/plugin/scripts/minify-client.mjs
-          node --check container/plugin/scripts/refresh-build-record.mjs
-
-      - name: Validate compose example
-        run: docker compose -f examples/compose.yaml config --quiet
-
-      - name: Validate quadlet example
-        run: |
-          sudo mkdir -p /etc/containers/systemd
-          sudo cp examples/dsh.container /etc/containers/systemd/
-          sudo systemctl daemon-reload
-          systemctl cat dsh.service >/dev/null
-
-      # dsh-v* tag 的发布闸门: 手工推 tag(绕过 release-prep 的契约 → triage →
-      # agent 环节)时, 这里仍然静态核对上游契约。漂移未处理就不发布镜像 ——
-      # 2026-09-22 dsh-v0.1.7-alpha.1 是这样手工发的, 当时没有人替我们把契约
-      # 检查跑一遍。非 tag 构建跳过(漂移由每日 watcher + release-prep 负责)。
-      - name: Upstream contract check (dsh-v* tags)
-        if: startsWith(github.ref, 'refs/tags/dsh-v')
-        run: bash tests/contract.sh --tag "${GITHUB_REF_NAME}"
-
-  image:
-    name: Build, validate and publish image (linux/amd64)
-    runs-on: ubuntu-latest
+  build:
     needs: validate
-    # 纯文档提交(see the classification step)不构建镜像; tag 构建永远构建。
-    if: needs.validate.outputs.docs_only != 'true'
+    if: needs.validate.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-    outputs:
-      name: ${{ steps.image.outputs.name }}
-      digest: ${{ steps.publish.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GitHub Container Registry
-        if: startsWith(github.ref, 'refs/tags/dsh-v')
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        if: needs.validate.outputs.publish == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      # GHCR 要求仓库名全小写, 而 github.repository 可能含大写(如 NIyueeE)。
-      - name: Compute lowercase image name
-        id: image
-        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
-      # 默认基础镜像由 Containerfile 的摘要锁定；可显式覆盖完整镜像引用。
-      - name: Compute build args
-        id: args
-        env:
-          BASE_IMAGE_OVERRIDE: ${{ vars.BASE_IMAGE }}
-        run: |
-          label="latest"
-          if [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" == dsh-v* ]]; then
-            label="${{ github.ref_name }}"
-          fi
-          {
-            echo "BUILD_GIT_SHA=${{ github.sha }}"
-            echo "BUILD_GIT_REF=${{ github.ref_name }}"
-            echo "BUILD_VERSION=$label"
-            if [ -n "$BASE_IMAGE_OVERRIDE" ]; then
-              echo "BASE_IMAGE=$BASE_IMAGE_OVERRIDE"
-            fi
-          } > /tmp/build-args.txt
-          {
-            echo "args<<EOF"
-            cat /tmp/build-args.txt
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      # 验证构建: 仅 linux/amd64, load 到本地供冒烟测试; 不推送。
-      - name: Build image (validation)
+      - name: Build and load for testing
         uses: docker/build-push-action@v7
         with:
           context: .
           file: Containerfile
-          platforms: linux/amd64
-          push: false
+          platforms: linux/${{ matrix.arch }}
           load: true
-          tags: |
-            ${{ steps.image.outputs.name }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: ${{ steps.args.outputs.args }}
-
-      - name: Verify inherited runtime, A2A bundle and TUI client
-        run: bash tests/extensions.sh '${{ steps.image.outputs.name }}:${{ github.sha }}'
-
-      # arm64 由原生 runner 并行构建, 最后由 merge job 合并为多架构镜像
-      # 并统一打 dsh-v* + <sha> + latest。坏镜像不会拿到任何 tag。
-      - name: Push linux/amd64 by digest (release only)
-        id: publish
-        if: startsWith(github.ref, 'refs/tags/dsh-v')
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Containerfile
-          platforms: linux/amd64
-          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: ${{ steps.args.outputs.args }}
-
-  # arm64 用 GitHub 公开仓库免费提供的原生 Arm runner 构建, 不走 QEMU 模拟
-  # (QEMU 下 pnpm 全量构建会慢一个数量级)。与 amd64 并行, 仅发布时构建。
-  image-arm64:
-    name: Build and publish image (linux/arm64)
-    runs-on: ubuntu-24.04-arm
-    needs: validate
-    if: startsWith(github.ref, 'refs/tags/dsh-v')
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      digest: ${{ steps.publish.outputs.digest }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # 与 amd64 job 相同的镜像名与 build args 计算。
-      - name: Compute lowercase image name
-        id: image
-        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
-      - name: Compute build args
-        id: args
+          push: false
+          tags: dsh-validation:local
+          build-args: |
+            BASE_IMAGE=${{ needs.validate.outputs.base_image }}
+            BUILD_VERSION=${{ needs.validate.outputs.image_tag }}
+            BUILD_GIT_SHA=${{ github.sha }}
+            BUILD_GIT_REF=${{ github.ref_name }}
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
+      - name: Verify runtime, A2A and TUI installation
+        run: bash tests/extensions.sh dsh-validation:local
+      # 只推送刚刚通过测试的本地镜像，不另跑一次构建。
+      - name: Push tested platform image
+        if: needs.validate.outputs.publish == 'true'
         env:
-          BASE_IMAGE_OVERRIDE: ${{ vars.BASE_IMAGE }}
+          IMAGE: ${{ needs.validate.outputs.image }}
+          TAG: ${{ needs.validate.outputs.image_tag }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          label="latest"
-          if [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" == dsh-v* ]]; then
-            label="${{ github.ref_name }}"
-          fi
-          {
-            echo "BUILD_GIT_SHA=${{ github.sha }}"
-            echo "BUILD_GIT_REF=${{ github.ref_name }}"
-            echo "BUILD_VERSION=$label"
-            if [ -n "$BASE_IMAGE_OVERRIDE" ]; then
-              echo "BASE_IMAGE=$BASE_IMAGE_OVERRIDE"
-            fi
-          } > /tmp/build-args.txt
-          {
-            echo "args<<EOF"
-            cat /tmp/build-args.txt
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Build and push by digest
-        id: publish
-        uses: docker/build-push-action@v7
+          set -euo pipefail
+          platform_tag="$IMAGE:$TAG-$ARCH"
+          docker tag dsh-validation:local "$platform_tag"
+          docker push "$platform_tag"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$platform_tag")"
+          digest="${digest##*@}"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+      - uses: actions/upload-artifact@v4
+        if: needs.validate.outputs.publish == 'true'
         with:
-          context: .
-          file: Containerfile
-          platforms: linux/arm64
-          outputs: type=image,name=${{ steps.image.outputs.name }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=build-arm64
-          cache-to: type=gha,mode=max,scope=build-arm64
-          build-args: ${{ steps.args.outputs.args }}
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
 
-  # 两个平台的 digest 都就绪后, 合并为一个多架构镜像并统一打版本 tag。
-  merge:
-    name: Merge multi-arch manifest
+  publish:
+    needs: [validate, build]
+    if: needs.validate.outputs.publish == 'true'
     runs-on: ubuntu-latest
-    needs: [image, image-arm64]
     permissions:
       contents: read
       packages: write
     steps:
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: digests
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create and tag multi-arch manifest
-        run: |
-          set -euo pipefail
-          image="${{ needs.image.outputs.name }}"
-          docker buildx imagetools create \
-            -t "$image:${{ github.sha }}" \
-            -t "$image:${{ github.ref_name }}" \
-            -t "$image:latest" \
-            "$image@${{ needs.image.outputs.digest }}" \
-            "$image@${{ needs.image-arm64.outputs.digest }}"
-
-      - name: Inspect multi-arch manifest
-        run: docker buildx imagetools inspect "${{ needs.image.outputs.name }}:${{ github.ref_name }}"
-
-  release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
-    needs: merge
-    if: startsWith(github.ref, 'refs/tags/dsh-v')
-    permissions:
-      contents: write
-    steps:
-      # 镜像构建 + 冒烟通过后才创建 Release 页面;
-      # 页面 tag 使用官方仓库 tag(如 dsh-v0.1.2-alpha.3)。
-      # 发布说明只有上游同名 tag 的 release notes(折叠引用, 上游是各版本迁移细节的
-      # 权威)、上游链接与 generate_release_notes 追加的本仓库提交清单;
-      # 本镜像自己的升级/适配说明不在这里逐版重复 —— 持久文档见
-      # docs/releasing.md § Release notes 与 § Upgrading data volumes to the
-      # image-owned toolchain、docs/deployment.md § 4。
-      - name: Compose release notes
+      - name: Publish multi-architecture version and latest
         env:
-          GH_TOKEN: ${{ github.token }}
-          UPSTREAM_REPO: ${{ vars.DSH_UPSTREAM_REPO || 'deepseek-ai/deepseek-harness' }}
+          IMAGE: ${{ needs.validate.outputs.image }}
+          TAG: ${{ needs.validate.outputs.image_tag }}
         run: |
           set -euo pipefail
-          body="$RUNNER_TEMP/release-body.md"
-          : > "$body"
-          # 上游 release notes: 取不到(无 Release 页/接口失败)就只留链接, 不让发版失败。
-          # 注意必须用 if 判断退出码: gh api 失败时会把错误 JSON 打到 stdout,
-          # 只看输出是否为空会把报错当说明引用进来。
-          if upstream="$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${GITHUB_REF_NAME}" --jq .body 2>/dev/null)" \
-              && [ -n "$upstream" ]; then
-            {
-              printf '<details>\n<summary>Upstream <code>%s</code> release notes (quoted)</summary>\n\n' "$GITHUB_REF_NAME"
-              printf '%s\n' "$upstream"
-              printf '\n</details>\n\n'
-            } >> "$body"
-          else
-            echo "note: no upstream release notes found for ${GITHUB_REF_NAME}; linking only" >&2
-          fi
-          printf -- '---\n\nUpstream release: https://github.com/%s/releases/tag/%s\n' \
-            "$UPSTREAM_REPO" "$GITHUB_REF_NAME" >> "$body"
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          body_path: ${{ runner.temp }}/release-body.md
-          generate_release_notes: true
-          make_latest: true
+          sources=()
+          for file in digests/*; do
+            digest="${file##*/}"
+            [[ "$digest" =~ ^[a-f0-9]{64}$ ]]
+            sources+=("$IMAGE@sha256:$digest")
+          done
+          test "${#sources[@]}" -eq 2
+          docker buildx imagetools create -t "$IMAGE:$TAG" -t "$IMAGE:latest" "${sources[@]}"
+          docker buildx imagetools inspect "$IMAGE:$TAG"
+          echo "Published $IMAGE:$TAG and $IMAGE:latest" >> "$GITHUB_STEP_SUMMARY"

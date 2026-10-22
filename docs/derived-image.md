@@ -41,12 +41,7 @@ apply; keep the UI private.
 Both dependency lockfiles are committed. `BASE_IMAGE` overrides the complete base reference;
 `DSH_TAG`, `RUST_TOOLCHAIN` and `UV_VERSION` no longer select builds in this fork. The inherited
 `provenance.json` describes the base; `extensions.json` and OCI labels describe this derived layer.
-The Image workflow uses the default pinned reference unless the `BASE_IMAGE` repository variable
-overrides it, builds the image, checks health, proxy authentication, A2A and the added client.
-The legacy `tests/smoke.sh` targets the source-built image (including SSH); it is not the test
-contract for this pinned published base.
-PRs do not publish images. No tag or release is needed to validate this change.
-
-Older source-build and release-preparation instructions in this repository describe upstream's
-pipeline, not a way to upgrade this pinned base. Do not run automatic source-tag release prep
-for this fork: update the base reference and validate the derived image explicitly instead.
+The Image workflow reads the pinned reference directly from Containerfile, checks health,
+proxy authentication, A2A and the added client on both architectures. Every main push publishes
+the version-plus-commit image tag and latest. PRs and manual runs never publish.
+See [Publication](releasing.md). Old source-build and release-preparation code has been removed.

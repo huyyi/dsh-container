@@ -1,58 +1,77 @@
-# dsh Container with A2A and TUI
+# dsh offline plugins
 
-A thin derivative of `ghcr.io/niyueee/dsh-container`. The base tag and multi-architecture digest
-are pinned in [Containerfile](Containerfile); this repository does not compile DeepSeek Harness.
+Repack versioned dsh plugins inside an existing host image, then install the
+output directories manually on an intranet. Use the prebuilt image from
+[NIyueeE/dsh-container](https://github.com/NIyueeE/dsh-container) directly.
 
-[中文](README.zh.md)
+English | [中文](README.zh.md)
 
-## Included extensions
+## Pack
 
-- `@ryubyte/dsh-a2a@0.3.1`: installed in the image, registered in the web profile, disabled by default.
-- `dsh-tui@0.2.19`: standalone terminal client with isolated dependencies.
-- Existing pinned bundles remain in the plugin payload.
-
-**Known limitation:** TUI installs and its help/version commands work, but its legacy
-`session.list` protocol is incompatible with this base (`session/list`, HTTP 404). Interactive
-TUI support is not complete. A2A discovery, authentication and offline enablement are tested.
-
-## Run
-
-After the first successful main publication:
+Docker is the only host requirement. Downloads, installs and builds run in
+temporary containers without changing an active dsh profile.
 
 ```sh
-docker run -d --name dsh -p 127.0.0.1:3081:3081 \
-  -v dsh-home:/home/dsh ghcr.io/huyyi/dsh-container:latest
-docker exec dsh dsh-tui --version
+bash plugin/offline_repack.sh \
+  --image ghcr.io/niyueee/dsh-container:dsh-v0.2.2-rc.2 \
+  --output ./offline-export
 ```
 
-Open http://127.0.0.1:3081 and configure your model. Enable A2A in Settings → Plugins, then
-configure its peers or inbound service. The image contains no model credentials.
-The existing Compose and multi-agent examples keep their own image references; they are not
-automatically switched to this derivative.
+[plugin/plugins.json](plugin/plugins.json) records exact versions and
+`pack_build_deps`. The initial list contains the previously packaged GenUI
+0.16.0 with its intranet map recipe. Old image-preinstalled plugins are not
+automatically added. `true` includes locked source and development dependencies
+for offline rebuilding; `false` includes built code and runtime dependencies.
 
-## Build and publication
+Each successful plugin produces a directory named
+`plugin-name-plugin-version-dsh-host-version`:
+
+```text
+offline-export/
+  changfenhuang--dsh-genui-0.16.0-dsh-0.2.2-rc.2/
+    plugin/
+    build/
+    offline-manifest.json
+    INSTALL.md
+    GENUI.md
+    genui-intranet.patch
+```
+
+Scoped names drop `@` and replace `/` with `--`. `build/` is included only when
+requested. Artifacts and caches stay outside Git. Existing outputs are never
+overwritten. Use different output parents for other architectures/host digests.
+
+## Install on the intranet
+
+Transfer the directory and the same host image. Mount `plugin/` outside
+`/home/dsh`, for example at `/opt/offline-plugins/genui`, and keep it mounted.
+Run inside the target container:
 
 ```sh
-docker build -f Containerfile -t dsh-a2a-tui:local .
-bash tests/extensions.sh dsh-a2a-tui:local
-python3 -m unittest discover -s tests -p 'test_*.py'
-python3 tests/validate-docs.py
+dsh plugin --profile web add link:/opt/offline-plugins/genui --offline --ignore-scripts
+dsh --profile web --dump-config
+dsh-restart
 ```
 
-Every main push builds, tests and publishes amd64/arm64 images, including documentation-only
-updates. Tags use the pinned upstream version plus seven commit characters, for example
-`dsh-v0.2.1-rc.2-cf05a2f`; successful publication also updates `latest`.
-PRs never publish and skip image builds for Markdown/LICENSE-only changes. Unknown diffs build.
-Manual dispatch validates only. Git tags and GitHub Releases are not created.
+Newly added bundles may be enabled by dsh; existing disabled bundles need
+enabling in Plugin Manager. Build dependencies increase size and build time.
+External services and model endpoints remain separate requirements. Runtime
+peers require the same host image digest and architecture.
 
-## Documentation
+## Verification
 
-- [Build](docs/build.md)
-- [Deployment](docs/deployment.md)
-- [Security](docs/security.md)
-- [Publication](docs/releasing.md)
-- [Development](docs/development.md)
-- [Extension details](docs/derived-image.md)
+Every pack is checked in a separate `--network none` container using a relocated
+read-only mount: hashes, links, offline installation, config resolution, entry
+import and, when requested, offline rebuild. No model requests are sent.
 
-The upstream runtime, proxy and toolchain come from the base image. This repository maintains
-only extension packaging, registration and verification; obsolete source-build adapters are removed.
+```sh
+bash tests/plugin-offline-repack.sh ghcr.io/niyueee/dsh-container:dsh-v0.2.2-rc.2
+```
+
+See [offline packaging](docs/offline-plugins.md), [development](docs/development.md),
+[deployment](docs/deployment.md) and [security](docs/security.md). The independent
+TUI client is no longer bundled; installation did not establish RPC compatibility.
+
+## License
+
+[MIT](LICENSE)

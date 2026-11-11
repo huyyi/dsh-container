@@ -1,18 +1,43 @@
 # Deployment
 
-Use ghcr.io/huyyi/dsh-container:latest after a successful main publication, or pin an immutable
-version-and-commit image tag described in [Publication](releasing.md).
+Use the [upstream image](https://github.com/NIyueeE/dsh-container) directly.
+Examples pin `dsh-v0.2.2-rc.2`. Transfer the same image digest recorded in the
+plugin manifest to the intranet.
 
-Publish 127.0.0.1:3081:3081 and persist /home/dsh. Host bind directories must be writable by
-UID 1000. Each agent needs its own home; do not share agent workspaces for A2A transport.
-Existing examples retain their own image references; choose the derivative explicitly.
+```sh
+docker compose -f examples/compose.yaml up -d
+```
 
-The inherited proxy manages the browser session. Configure model credentials in the web UI,
-enable A2A in Settings → Plugins, then configure discovery URLs and bearer tokens.
-For separate hosts, use reachable advertised URLs and TLS or a trusted private network.
+Open `http://127.0.0.1:3081/`. The proxy supplies an authenticated dsh session
+to anyone who can reach it. Loopback is the default; broader exposure requires
+basic auth, TLS and trusted networking. Never publish internal 3080. Optional
+SSH is not configured. Persist `/home/dsh` and keep plugin payloads outside it.
 
-Use dsh-restart inside a running container to restart the inherited web service.
-The pinned base does not include an SSH daemon. Nested Podman support depends on the base
-and host permissions and is not guaranteed by this derivative.
+## Mount and install
 
-See [Security](security.md) and [extension details](derived-image.md).
+Add a read-only bind mount in [compose.yaml](../examples/compose.yaml):
+
+```yaml
+volumes:
+  - dsh-home:/home/dsh
+  - /absolute/path/to/package/plugin:/opt/offline-plugins/genui:ro
+```
+
+Recreate the container, then install manually:
+
+```sh
+docker exec dsh dsh plugin --profile web add link:/opt/offline-plugins/genui --offline --ignore-scripts
+docker exec dsh dsh --profile web --dump-config
+docker exec dsh dsh-restart
+```
+
+Keep the mount stable. `build/` is not needed for normal use. See
+[offline packaging](offline-plugins.md) for compatibility and rebuilding.
+Existing multi-agent demos retain their own deployment assumptions; install
+their required A2A bundle manually before using them.
+
+## Podman
+
+[dsh.container](../examples/dsh.container) is a minimal Quadlet example.
+Follow upstream documentation for optional nested containers and advanced
+networking; those features are independent of plugin packaging.

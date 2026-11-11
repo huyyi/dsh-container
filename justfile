@@ -1,39 +1,11 @@
-# dsh 容器镜像常用命令(需 podman 或 docker)
+# 插件打包和验证；不构建宿主镜像。
+image := "ghcr.io/niyueee/dsh-container:dsh-v0.2.2-rc.2"
 
-container := `command -v podman >/dev/null 2>&1 && echo podman || echo docker`
-build_format := if container == "podman" { "--format docker" } else { "" }
+pack host=image:
+    bash plugin/offline_repack.sh --image {{host}}
 
-# 本地构建镜像(不推送)。podman 必须用 --format docker 保留 HEALTHCHECK
-# (podman 默认 OCI 格式会丢弃 HEALTHCHECK); docker 不支持该 flag, 因此条件传入。
-build:
-    {{container}} build {{build_format}} -f Containerfile -t dsh-a2a-tui:local .
+test host=image:
+    bash tests/plugin-offline-repack.sh {{host}}
 
-# 前台调试运行(回环端口映射, 与 examples 一致 —— 局域网暴露是显式
-# 的 -p 3081:3081 改绑动作; --rm 退出后用户层改动随容器丢弃)
-debug:
-    {{container}} run --rm -p 127.0.0.1:3081:3081 \
-        dsh-a2a-tui:local
-
-# 在不重启容器的情况下重启容器内的 dsh web(dsh-web 守护会自动重新拉起)
-restart-dsh:
-    {{container}} exec dsh dsh-restart
-
-# 对已构建镜像跑冒烟测试(先 just build; DOCKER 已按 podman/docker 自动选择)
-test image="dsh-a2a-tui:local":
-    DOCKER={{container}} bash tests/extensions.sh {{image}}
-
-# 本地静态门禁: 与 CI 的 "Shell syntax and lint check" / "Doc links resolve" /
-# "README parity" 三步同一套判据, 不必推 CI 才知道坏了。不需要容器。
-# shellcheck 缺失时明确失败(不静默跳过): CI runner 自带, 本地按发行版安装
-# (Debian/Ubuntu: apt install shellcheck; macOS: brew install shellcheck)。
 lint:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if ! command -v shellcheck >/dev/null 2>&1; then
-        echo "lint: shellcheck 未安装 —— Debian/Ubuntu: sudo apt install shellcheck; macOS: brew install shellcheck" >&2
-        exit 1
-    fi
-    bash -n container/*.sh tests/*.sh
-    shellcheck container/*.sh tests/*.sh
-    python3 tests/validate-docs.py
-    python3 -m unittest discover -s tests -p 'test_*.py'
+    bash tests/lint.sh

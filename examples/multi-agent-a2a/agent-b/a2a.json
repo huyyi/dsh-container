@@ -1,0 +1,23 @@
+{
+  "mode": "server",
+  "server": {
+    "enabled": true,
+    "baseUrl": "http://agent-b:3081",
+    "agentName": "WH-SH-03 warehouse planner",
+    "agentDescription": "Warehouse WH-SH-03: fill a robot localization document using private layout and radar geometry.",
+    "agentVersion": "2.0.0",
+    "authToken": "local-a2a-demo-change-before-remote-use",
+    "skills": [
+      {
+        "id": "localization",
+        "name": "Warehouse localization plan",
+        "description": "For WH-SH-03, complete the room-layout and sensor-adjustment sections of the supplied full Markdown document. Validate sector coverage and return the entire document as text.",
+        "tags": [
+          "warehouse",
+          "radar",
+          "localization"
+        ]
+      }
+    ]
+  }
+}

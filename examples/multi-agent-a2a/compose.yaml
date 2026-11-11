@@ -1,0 +1,31 @@
+name: dsh-multi-agent-a2a
+
+services:
+  agent-a:
+    image: ghcr.io/niyueee/dsh-container:dsh-v0.2.1-rc.2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3381:3081"
+    volumes:
+      - ./data/agent-a:/home/dsh
+      - ./agent-a/AGENTS.md:/home/dsh/AGENTS.md:ro
+      - ./agent-a/a2a.json:/demo/a2a.json:ro
+      - ./agent-a/brief.md:/home/dsh/brief.md:ro
+      - ./agent-a/offline-event.json:/home/dsh/offline-event.json:ro
+      - ./agent-a/warehouses.json:/home/dsh/warehouses.json:ro
+      - ./agent-a/定位方案.template.md:/demo/定位方案.template.md:ro
+      - ./agent-a/document.mjs:/demo/document.mjs:ro
+      - ./init-config.mjs:/demo/init-config.mjs:ro
+  agent-b:
+    image: ghcr.io/niyueee/dsh-container:dsh-v0.2.1-rc.2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3481:3081"
+    volumes:
+      - ./data/agent-b:/home/dsh
+      - ./agent-b/AGENTS.md:/home/dsh/AGENTS.md:ro
+      # 安装后由初始化脚本复制到入站会话 cwd，避免嵌套挂载创建 root 属主目录。
+      - ./agent-b/AGENTS.md:/demo/inbound-AGENTS.md:ro
+      - ./agent-b/a2a.json:/demo/a2a.json:ro
+      - ./agent-b/check_geometry.py:/demo/check_geometry.py:ro
+      - ./init-config.mjs:/demo/init-config.mjs:ro

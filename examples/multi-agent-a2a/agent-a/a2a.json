@@ -1,0 +1,12 @@
+{
+  "mode": "client",
+  "agents": [
+    {
+      "name": "executor",
+      "agentCardUrl": "http://agent-b:3081/.well-known/agent-card.json",
+      "bearerToken": "local-a2a-demo-change-before-remote-use",
+      "timeoutMs": 300000,
+      "mapSkills": true
+    }
+  ]
+}

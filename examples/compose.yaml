@@ -1,89 +1,19 @@
-# Start:   docker compose -f examples/compose.yaml up -d
-# Podman:  podman-compose -f examples/compose.yaml up -d
-#
-# Pulls the published GHCR image; no local build is required.
-# See docs/deployment.md for the full guide.
-#
-# Networking: plain bridge networking; the host port is published on loopback
-# only (127.0.0.1:3081), so LAN/public exposure is an explicit step (see the
-# ports block and docs/deployment.md "Public deployment"). dsh web listens on
-# 127.0.0.1 inside the container (upstream dsh rejects --host 0.0.0.0); Caddy
-# listens on 0.0.0.0:3081 and rewrites Host/Origin to loopback before forwarding
-# to dsh on 127.0.0.1:3080. The proxy bootstraps the dsh browser session
-# automatically (no login URL), and the image applies an idempotent client-side
-# patch before each dsh web start so remote browsers can use settings/credentials.
-#
-# Persistence: the whole /home/dsh directory is one named volume (the user
-# layer). System packages and /usr/local are replaced on image upgrades while
-# user state and user-installed tools survive.
-
+# 直接使用上游宿主，插件独立挂载并手动安装。
 services:
   dsh:
-    image: ghcr.io/niyueee/dsh-container:latest
+    image: ${DSH_IMAGE:-ghcr.io/niyueee/dsh-container:dsh-v0.2.2-rc.2}
     container_name: dsh
     restart: unless-stopped
     ports:
-      # Host loopback only: reachable from the host itself (and from a host-side
-      # reverse proxy such as nginx). For plain LAN access use "3081:3081" —
-      # basic auth below then becomes mandatory, not optional.
       - "127.0.0.1:3081:3081"
-      # Optional SSH (key-only, opt-in). Publishing this is what makes the
-      # daemon reachable; a login here is a shell with passwordless sudo, so
-      # treat it like a root password and keep it on loopback unless you mean
-      # otherwise (docs/security.md § SSH access).
-      #   - "127.0.0.1:2222:22"
-    # Runtime configuration surface: auth pair. Set both auth variables or
-    # neither. Setting only one fails startup. Loopback-only publishing (the
-    # default) is safe without auth; enable basic auth before switching the
-    # publish line to "3081:3081" (plain LAN) or exposing the host proxy
-    # publicly. The proxy is the security boundary; see docs/security.md.
-    # Optional SSH: sshd starts only with DSH_SSH_ENABLED, and only public keys
-    # are accepted (no passwords). Supply a key here or persist one in the
-    # volume at ~/.ssh/authorized_keys (mkdir -p home/.ssh; chmod 700 …).
+    # 扩大访问范围前，同时配置认证、TLS 和可信网络。
     # environment:
-    #   DSH_PROXY_USER: "admin"
-    #   DSH_PROXY_PASSWORD: "replace-with-a-strong-password"
-    #   DSH_SSH_ENABLED: "1"
-    #   DSH_SSH_AUTHORIZED_KEYS: "ssh-ed25519 AAAA… you@example"
-    #   DSH_SSH_PORT: "22"
+    #   DSH_PROXY_USER: admin
+    #   DSH_PROXY_PASSWORD: replace-with-a-strong-password
     volumes:
       - dsh-home:/home/dsh
-      # Host-visible alternative (owner must be uid 1000; keep :Z on SELinux):
-      #   mkdir -p home && sudo chown -R 1000:1000 home
-      #   - ./home:/home/dsh:Z
-    # Optional docker-in-docker: privileged alone is not enough; dockerd must be
-    # started inside the container. Mounting /var/run/docker.sock is equally
-    # high-risk. Only enable either for trusted workloads.
-    # privileged: true
-    # Optional: in-container (rootless) podman. The image prepares the rootless
-    # flow (subuid/subgid, crun, fuse-overlayfs, slirp4netns); the host still has
-    # to allow nested user namespaces (unconfined seccomp), fuse, the tun device
-    # for rootless networking, and — podman 5.x requirement — an unmasked /proc.
-    # Uncomment what your host needs:
-    #   security_opt:
-    #     - seccomp=unconfined     # Docker's default seccomp may block the inner unshare
-    #     - apparmor=unconfined    # only on AppArmor hosts
-    #     - systempaths=unconfined # clear /proc masks (Docker spelling; Podman: unmask=ALL)
-    #     # no-new-privileges would block setuid newuidmap — do NOT combine
-    #   devices:
-    #     - /dev/fuse:/dev/fuse    # fuse-overlayfs storage driver
-    #     - /dev/net/tun:/dev/net/tun  # rootless networking (host needs the tun module)
-    #   cap_add:
-    #     - CAP_SYS_ADMIN          # only for the rootful (`sudo podman`) fallback
-    #     - CAP_NET_ADMIN
-    # Without /dev/net/tun, `podman run --network=host ...` still works (the
-    # default rootless networking needs the tap device). Without /dev/fuse,
-    # `podman --storage-driver vfs ...` still works (slower).
-    # Enabling these weakens the container boundary — see docs/security.md.
-    # See docs/deployment.md "In-container podman".
-    # Resource limits (--memory/--cpus) are NOT enforced inside nested
-    # containers regardless of these flags (cgroup v2 constraint) — see
-    # docs/deployment.md § In-container podman.
-    # Optional: change dsh's internal port (the exposed port stays 3081).
-    # The entrypoint rejects --port 3081 (proxy conflict) and --port 0.
-    # command: ["--port", "8080"]
-    # Restart dsh web without restarting the container:
-    #   docker exec dsh dsh-restart
+      # 已打包插件挂载到持久化 home 之外，并保持路径稳定。
+      # - /absolute/path/to/package/plugin:/opt/offline-plugins/genui:ro
 
 volumes:
   dsh-home:

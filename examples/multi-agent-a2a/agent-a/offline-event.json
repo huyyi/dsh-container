@@ -1,0 +1,13 @@
+{
+  "eventId": "OFFLINE-20261021-017",
+  "robotId": "AMR-017",
+  "warehouseId": "WH-SH-03",
+  "offlineAt": "2026-10-21T14:30:00+08:00",
+  "lastKnownPosition": {
+    "x": 8.5,
+    "y": 5.5,
+    "coordinateFrame": "warehouse-local-meters"
+  },
+  "positionAgeSeconds": 120,
+  "priorityRadiusMeters": 3
+}

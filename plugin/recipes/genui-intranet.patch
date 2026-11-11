@@ -1,0 +1,151 @@
+--- /dev/null
++++ b/src/map-settings.ts
+@@ -0,0 +1,43 @@
++export interface MapTileSettings {
++  url: string
++  scheme?: 'xyz' | 'tms'
++  tileSize?: number
++  minZoom?: number
++  maxZoom?: number
++  attribution?: string
++}
++
++// 配置仅由宿主提供，不读取模型生成的围栏。
++export function mapTileStyle(value: unknown) {
++  if (value === undefined || value === null) return undefined
++  if (typeof value !== 'object') throw new Error('mapTiles must be an object')
++  const v = value as Record<string, unknown>
++  if (typeof v.url !== 'string' || !['{z}', '{x}', '{y}'].every(key => (v.url as string).includes(key))) {
++    throw new Error('mapTiles.url must contain {z}, {x}, {y}')
++  }
++  const url = new URL(v.url, 'http://genui.invalid')
++  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
++    || (!/^https?:\/\//i.test(v.url) && !/^\/(?!\/)/.test(v.url))) {
++    throw new Error('mapTiles.url must be HTTP(S) or a root-relative path without credentials')
++  }
++  if (v.scheme !== undefined && v.scheme !== 'xyz' && v.scheme !== 'tms') throw new Error('Invalid tile scheme')
++  for (const [key, fallback, maximum] of [['tileSize', 256, 4096], ['minZoom', 0, 20], ['maxZoom', 20, 20]] as const) {
++    const n = v[key] ?? fallback
++    if (typeof n !== 'number' || !Number.isInteger(n) || n < (key === 'tileSize' ? 1 : 0) || n > maximum) {
++      throw new Error(`Invalid mapTiles.${key}`)
++    }
++  }
++  if (Number(v.minZoom ?? 0) > Number(v.maxZoom ?? 20)) throw new Error('Invalid tile zoom range')
++  if (v.attribution !== undefined && typeof v.attribution !== 'string') throw new Error('Invalid attribution')
++  return {
++    version: 8 as const,
++    sources: {
++      'genui-intranet': {
++        type: 'raster', tiles: [v.url], scheme: v.scheme ?? 'xyz',
++        tileSize: v.tileSize ?? 256, minzoom: v.minZoom ?? 0, maxzoom: v.maxZoom ?? 20,
++        attribution: v.attribution ?? '',
++      },
++    },
++    layers: [{ id: 'genui-intranet', type: 'raster', source: 'genui-intranet' }],
++  }
++}
+--- a/src/plugin/index.ts
++++ b/src/plugin/index.ts
+@@ -21,6 +21,7 @@
+ import { createRenderUiTool, createValidateDshUiTool } from './tool.ts'
+ import { installFenceFeedback } from './fence-feedback.ts'
+ import { installDshGoNative } from './dsh-go-native.ts'
++import { mapTileStyle, type MapTileSettings } from '../map-settings.ts'
+ 
+ /* ---------------- lazy engine asset route ---------------- */
+ 
+@@ -42,7 +43,7 @@
+ const ASSET_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.js$/
+ 
+ /** The handler itself (registered via the optional webServer probe). */
+-async function serveGenuiAsset(req: IncomingMessage, res: ServerResponse): Promise<void> {
++async function serveGenuiAsset(req: IncomingMessage, res: ServerResponse, mapConfig?: unknown): Promise<void> {
+   if (req.method !== 'GET' && req.method !== 'HEAD') {
+     res.writeHead(405)
+     res.end()
+@@ -63,6 +64,12 @@
+     return
+   }
+   const file = rel.slice(1)
++  // 与引擎资源共用宿主已鉴权路由，配置不进入模型上下文。
++  if (file === 'map-config.json') {
++    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
++    res.end(JSON.stringify(mapConfig ?? null))
++    return
++  }
+   if (!ASSET_FILE_RE.test(file)) {
+     res.writeHead(404)
+     res.end()
+@@ -200,6 +207,8 @@
+  * imports no schema library, so a profile can set these keys directly).
+  */
+ export interface GenuiPluginConfig {
++  /** 内网栅格瓦片地址及地图显示参数。 */
++  mapTiles?: MapTileSettings
+   /**
+    * 在最终 dsh-ui 围栏无法渲染的回合中请求模型发送一次修正版（issue #160）。
+    * 默认开启，设置为 false 可以关闭同回合围栏修正。GenUI 回合的 reasoning-only 响应仍会交给宿主重试策略处理。
+@@ -214,6 +223,8 @@
+ }
+ 
+ export function apply(ctx: Context, config?: GenuiPluginConfig): void {
++  const style = mapTileStyle(config?.mapTiles)
++  const mapConfig = style === undefined ? undefined : { style }
+   installDshGoNative(ctx)
+   const renderUiToolEnabled = config?.renderUiTool !== false
+   ctx.systemPrompt.section({
+@@ -243,7 +254,8 @@
+   ctx.inject(['webServer'], (webCtx) => {
+     const webServer = webCtx.reflect.get('webServer') as { register(route: unknown): () => void }
+     webCtx.effect(
+-      () => webServer.register({ kind: 'prefix', path: ASSET_ROUTE_PATH, handler: serveGenuiAsset }),
++      () => webServer.register({ kind: 'prefix', path: ASSET_ROUTE_PATH,
++        handler: (req: IncomingMessage, res: ServerResponse) => serveGenuiAsset(req, res, mapConfig) }),
+       'dsh-genui: asset route',
+     )
+   })
+--- a/src/client/index.tsx
++++ b/src/client/index.tsx
+@@ -31,6 +31,7 @@
+ import { bridgeHostLocale, t } from './i18n/index.ts'
+ import type { InputTriggerServiceContract } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
+ import { assetUrl } from './asset-loader.ts'
++import { setGenuiMapConfig, type GenuiMapConfig } from './map-config.ts'
+ 
+ /** Add low-priority prefetch links for the lazy engine assets (mermaid/three).
+  * Browser-dependent: some engines ignore `<link rel=prefetch>`; harmless
+@@ -117,6 +118,15 @@
+  * toolview for the render_ui tool, and the session panel dock; returning the
+  * disposers lets cordis tear all registrations down on plugin unload. */
+ export function apply(ctx: Context): () => void {
++  // 按 docs/map.md 从可信宿主配置注入样式；卸载时撤销请求和页面级配置。
++  const mapConfigRequest = new AbortController()
++  void fetch(assetUrl('map-config.json'), { signal: mapConfigRequest.signal, cache: 'no-store', credentials: 'same-origin' })
++    .then(response => {
++      if (!response.ok) throw new Error('Map configuration unavailable')
++      return response.json() as Promise<GenuiMapConfig | null>
++    })
++    .then(config => { if (!mapConfigRequest.signal.aborted) setGenuiMapConfig(config ?? undefined) })
++    .catch(() => { if (!mapConfigRequest.signal.aborted) console.warn('[genui] Map configuration unavailable; using blank basemap') })
+   // Provider 提交所属线程身份和专属操作路由；DOM renderer 继续忽略这些 surface。
+   ctx.inject(['genuiSidechat'], scope => {
+     scope.effect(() => installSidechatAdapter(scope.get('genuiSidechat') as Partial<SidechatSurfaceService> | undefined), 'genui: host sidechat surface')
+@@ -192,6 +202,8 @@
+     ), 'genui: /panel')
+   })
+   return () => {
++    mapConfigRequest.abort()
++    setGenuiMapConfig(undefined)
+     for (const dispose of disposers) dispose()
+   }
+ }
+--- a/src/client/asset-echarts.ts
++++ b/src/client/asset-echarts.ts
+@@ -8,6 +8,7 @@
+  */
+ import { init as echartsInit, type EChartsType, type EChartsCoreOption } from 'echarts'
+ import 'echarts-wordcloud'
++import './offline-maps.ts'
+ 
+ /** The engine surface registered by the echarts asset bundle. */
+ export interface EChartsAssetApi {

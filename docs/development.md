@@ -1,19 +1,30 @@
 # Development
 
-This repository maintains a derivative, not upstream Harness source. Keep changes scoped to
-extension packaging, registration, CI and deployment documentation.
+Maintain the offline plugin packer. Host images come from
+[upstream](https://github.com/NIyueeE/dsh-container); no host image is built or
+published here.
+
+## Layout
+
+- [plugin/](../plugin/): configuration, orchestration, runtime graph, verifier
+  and plugin recipes.
+- [tests/](../tests/): static checks and container integration tests.
+- [examples/](../examples/): deployments and existing local demos.
+- `offline-export/`: ignored local output.
+
+Keep patches in recipes. Do not copy upstream runtime scripts. New plugins
+need exact versions and explicit `pack_build_deps`. Only previously packaged
+plugins belong in the initial migrated list. Downloads, caches and artifacts
+must stay outside Git.
+
+## Checks
 
 ```sh
-bash -n container/*.sh tests/*.sh
-shellcheck container/*.sh tests/*.sh
-python3 -m unittest discover -s tests -p 'test_*.py'
-python3 tests/validate-docs.py
-docker compose -f examples/compose.yaml config --quiet
+just lint
+bash tests/plugin-offline-repack.sh ghcr.io/niyueee/dsh-container:dsh-v0.2.2-rc.2
 ```
 
-After runtime or dependency changes, build Containerfile and run tests/extensions.sh against
-that image. Tests do not call model providers. Both architectures run the same smoke test in CI.
-TUI CLI startup is tested, but the documented RPC incompatibility remains unresolved.
-
-README.md is the English source of truth; README.zh.md mirrors headings, links and code blocks.
-Code comments are Chinese. Never include host data, credentials or local demo output in commits.
+Checks include shellcheck, Node tests, Python unittest discovery, documentation,
+README parity and Compose parsing. Integration tests download inputs in a
+producer and validate in a separate offline consumer. No model requests are
+sent. CI validates without publishing images or rewriting the plugin list.

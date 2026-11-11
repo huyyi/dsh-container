@@ -1,0 +1,7 @@
+{
+  "WH-SH-03": {
+    "agentName": "executor",
+    "agentCardUrl": "http://agent-b:3081/.well-known/agent-card.json",
+    "toolName": "a2a__executor__localization"
+  }
+}

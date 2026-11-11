@@ -1,12 +1,7 @@
-# 定期检查 Actions 与 Containerfile 固定的上游镜像；插件由人工验证后更新。
+# 定期检查 Actions；宿主镜像和插件由人工验证后更新。
 version: 2
 updates:
   - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-
-  - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "weekly"

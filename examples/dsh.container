@@ -1,79 +1,15 @@
-# systemd Quadlet example for Podman >= 4.4.
-# See docs/deployment.md for the full guide.
-#
-# Install:
-#   sudo mkdir -p /etc/containers/systemd
-#   sudo cp examples/dsh.container /etc/containers/systemd/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now dsh.service
-#
-# Pulls the published GHCR image; no local build is required.
-# Open http://127.0.0.1:3081 (published on host loopback).
-
+# 最小 Quadlet 示例；高级宿主能力参见上游部署文档。
 [Unit]
 Description=DeepSeek Harness (dsh) Web UI
 After=network-online.target
 Wants=network-online.target
 
 [Container]
-Image=ghcr.io/niyueee/dsh-container:latest
+Image=ghcr.io/niyueee/dsh-container:dsh-v0.2.2-rc.2
 ContainerName=dsh
-# Host loopback -> container 3081. Caddy listens on 0.0.0.0:3081 inside the
-# container and rewrites Host/Origin to loopback before forwarding to dsh on
-# 127.0.0.1:3080. The proxy bootstraps the dsh browser session automatically
-# (no login URL) and the image applies an idempotent client-side patch before
-# each dsh web start so remote browsers can use settings/credentials.
-# For plain LAN access use (basic auth then mandatory):
-# PublishPort=3081:3081
 PublishPort=127.0.0.1:3081:3081
-# Runtime configuration surface: auth pair. Set both auth variables or
-# neither. Setting only one fails startup. Loopback-only publishing (the
-# default) is safe without auth; enable basic auth before switching to
-# PublishPort=3081:3081 (plain LAN) or exposing the host proxy publicly.
-# Environment=DSH_PROXY_USER=admin
-# Environment=DSH_PROXY_PASSWORD=replace-with-a-strong-password
-# Optional: change dsh's internal port (the exposed port stays 3081).
-# Exec=--port 8080
-# Optional: in-container (rootless) podman. The image prepares the rootless
-# flow (subuid/subgid, crun, fuse-overlayfs, slirp4netns); the host still has to
-# allow nested user namespaces, fuse, the tun device for rootless networking,
-# and — podman 5.x requirement — an unmasked /proc (crun mounts a fresh /proc
-# inside the nested container, which the kernel only allows when the outer
-# /proc is fully visible). Run `podman exec -it dsh bash` then plain
-# `podman run ...` as the dsh user — no sudo needed.
-#   UserNS=keep-id          # rootless podman host only; WRONG on rootful hosts
-#                           # (as root it overrides the image's USER, so dsh
-#                           # state lands in /root/.dsh, lost on recreate,
-#                           # instead of the /home/dsh volume)
-Unmask=ALL                 # native key (podman >= 5.x; older: PodmanArgs=--security-opt unmask=ALL);
-                           # Docker's equivalent spelling is systempaths=unconfined
-AddDevice=-/dev/fuse       # fuse-overlayfs storage driver; '-' prefix: optional, hosts without fuse still start
-AddDevice=-/dev/net/tun    # rootless networking; host needs the tun module (modprobe tun).
-                           # Without it, nested containers need `podman run --network=host/none`
-SeccompProfile=unconfined  # native key, podman >= 4.4; allows the inner unshare(2)
-PodmanArgs=--security-opt apparmor=unconfined   # only on AppArmor hosts;
-  # use PodmanArgs rather than the native AppArmor= key, which needs podman >= 5.8
-#   AddCapability=CAP_SYS_ADMIN CAP_NET_ADMIN   # only for the rootful (`sudo podman`) fallback
-# `PodmanArgs=--privileged` is the blunt equivalent of those keys.
-# Values in Environment= must escape a literal percent sign as %%, otherwise
-# systemd fails to load the generated unit ("Failed to resolve unit specifiers").
-# Without /dev/net/tun, `podman run --network=host ...` still works; without
-# /dev/fuse, `podman --storage-driver vfs ...` still works (slower).
-# Enabling any of this weakens the container boundary — see docs/security.md.
-# See docs/deployment.md "In-container podman" for the full host matrix.
-# Resource limits (--memory/--cpus) are NOT enforced inside nested containers
-# regardless of these flags (cgroup v2 constraint) — see docs/deployment.md
-# § In-container podman.
-# Restart dsh web without restarting the container:
-#   podman exec dsh dsh-restart
-# Persist the whole user home. User state and user-installed tools survive
-# image upgrades; the system layer is replaced. For host-visible storage use a
-# bind mount owned by uid 1000 (keep :Z on SELinux):
-# Volume=/home/you/dsh-home:/home/dsh:Z
 Volume=dsh-home:/home/dsh
-# Pull a newer image on restart and check the registry periodically:
-Pull=newer
-AutoUpdate=registry
+# Volume=/absolute/path/to/package/plugin:/opt/offline-plugins/genui:ro
 
 [Service]
 Restart=on-failure

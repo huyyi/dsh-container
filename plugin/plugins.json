@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "name": "@changfenhuang/dsh-genui",
+      "version": "0.16.0",
+      "pack_build_deps": true,
+      "source": {
+        "url": "https://api.github.com/repos/omdsh-dev/dsh-genui/tarball/v0.16.0",
+        "sha256": "9bd21935ebcde3167500d90fa734965b1a8341283f287f1c1268a97cf081a894"
+      },
+      "recipe": "genui-intranet"
+    }
+  ]
+}

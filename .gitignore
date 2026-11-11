@@ -1,3 +1,7 @@
 # 如果把 compose 的 /home/dsh 改成宿主目录绑定挂载, 该目录不入库
 home/
 __pycache__/
+offline-export/
+# 保留迁移前本地依赖和产物，不再维护镜像 payload。
+/container/
+/offline-export-*.tgz

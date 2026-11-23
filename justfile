@@ -38,6 +38,10 @@ lint:
         echo "lint: shellcheck 未安装 —— Debian/Ubuntu: sudo apt install shellcheck; macOS: brew install shellcheck" >&2
         exit 1
     fi
-    bash -n container/*.sh tests/*.sh
-    shellcheck container/*.sh tests/*.sh
+    bash -n container/*.sh tests/*.sh scripts/*.sh
+    shellcheck container/*.sh tests/*.sh scripts/*.sh
     python3 tests/validate-docs.py
+
+# 在目标镜像中生成离线插件包并验证断网安装
+package-plugins image tag output:
+    scripts/package-plugins.sh {{image}} {{tag}} {{output}}

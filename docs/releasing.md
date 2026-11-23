@@ -239,8 +239,8 @@ Weekly version updates for the dependencies that are pinned in this repository:
   `softprops/action-gh-release`);
 - `docker` — the `debian:12-slim` base image in the `Containerfile` (uv switched to the official
   installer script, so it is no longer a Dependabot-managed pin). The pinned dsh plugin payload
-  (`container/plugin-payload/pnpm-lock.yaml`) is deliberately **not** covered: update it by hand —
-  change the version in `container/plugin-payload/package.json` and regenerate the lockfile.
+  (`plugins/plugins.json`) is deliberately **not** covered: update it by hand —
+  change the pinned `package@version` in `plugins/plugins.json`. Packaging records resolved npm lockfiles in each archive.
 
 Upstream dsh tags are intentionally *not* covered by Dependabot — it has no ecosystem for watching
 another repository's git tags; that is the watcher workflow's job.
@@ -287,3 +287,9 @@ done
   `latest`.
 - Deleting the **whole package** removes its settings too; after recreating the package, set its
   visibility in the GitHub package settings if public pulls are needed.
+
+Offline plugin archives are built inside each native architecture's target image by
+`scripts/package-plugins.sh IMAGE TAG OUTPUT`. Packaging includes dev/build dependencies and
+Python wheels. A relocated extraction must install in a network-disabled container before the
+archive is uploaded; both architecture jobs must pass before the release is created. Catalog
+entries rejected by the host compatibility rules are recorded as skipped.

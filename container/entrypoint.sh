@@ -18,11 +18,7 @@
 #      nil panic(bookworm 的 podman 4.3.1 rootless 路径同样需要自建 userns)。
 #      宿主侧还需的 /dev/fuse、/dev/net/tun、unmask /proc 条件见
 #      docs/deployment.md "In-container podman"。
-#   5. 登记镜像自带插件: dsh-plugins-seed 把 /opt/dsh-plugins 里的插件写进数据卷
-#      web profile 的 dependencies 与 node_modules 软链, 但**不启用**(状态 =
-#      已安装未启用, 用户在 设置 > 插件管理器 里一键启用; 见该脚本头注)。
-#      失败只告警, 不阻断启动; DSH_SKIP_PLUGIN_SEED=1 可整体关闭。
-#   6. exec dsh-web —— dsh web 的启动/监督、会话 cookie 的就绪等待与 Caddy
+#   5. exec dsh-web —— dsh web 的启动/监督、会话 cookie 的就绪等待与 Caddy
 #      反代全部由 dsh-web 托管(会话 cookie 自举由容器适配插件在 dsh 进程内
 #      完成, 见 container/plugin/ 与 container/dsh-web.sh); 可选的 sshd
 #      (DSH_SSH_ENABLED, 配置见 container/sshd_config)也由 dsh-web 监督。
@@ -135,12 +131,5 @@ fi
 # 内部端口经环境传给 dsh-web(它挂载容器适配插件启动 dsh web —— 插件完成
 # 会话 cookie 自举 —— 并托管 Caddy 反代与整个服务栈)。
 export DSH_WEB_PORT="$PORT"
-
-# 镜像自带插件的登记(见 container/dsh-plugins-seed.sh): 只写依赖与软链,
-# 不写 dsh.profile.bundles —— 插件在 设置 > 插件管理器 里保持"已安装/未启用",
-# 由用户决定是否启用。这一步是附加能力, 失败只告警: dsh web 必须照常启动。
-if ! dsh-plugins-seed; then
-  echo "[entrypoint] WARNING: dsh-plugins-seed failed; continuing without registering image plugins" >&2
-fi
 
 exec dsh-web "$@"

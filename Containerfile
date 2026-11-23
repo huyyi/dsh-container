@@ -56,13 +56,7 @@
 #          .dsh-build 摘要(前两步改了字节, 否则 readClientBuildRecord 会失败)。
 #     三步都 fail-fast。不再注入 randomUUID polyfill: 上游自带
 #     不依赖 secure context 的 randomUuid()(util-crypto)
-#   - 镜像自带一组 dsh 插件(见下文"插件载荷"一节): 代码按精确版本装在
-#     /opt/dsh-plugins(镜像所有, 随镜像升级整体重置), 首次启动由
-#     dsh-plugins-seed 登记进数据卷 web profile 的 dependencies 与 node_modules
-#     软链, 但**不**写 dsh.profile.bundles —— 状态是"已安装但未启用": 插件在
-#     设置 > 插件管理器 里显示为已安装/未启用, 用户点一下即启用(只追加一个包名,
-#     全程离线)。之所以不预置到 /home/dsh: 该目录整体是数据卷(也可能是 bind
-#     mount), 镜像构建期写进去的内容会被卷遮蔽; 卷上只多两条元数据
+#   - 第三方插件按架构离线打包为 Release 附件，不进入镜像。
 #   - 可选 SSH 服务端(opt-in): 第 1 步装 openssh-server, DSH_SSH_ENABLED 为真时
 #     dsh-web 用 root 启动 /usr/sbin/sshd -f /etc/ssh/sshd_config.dsh(独立完整
 #     配置, 不读发行版 sshd_config), 仅公钥认证、禁 root 登录、禁密码与 PAM;
@@ -169,8 +163,8 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/home/dsh/.local/bin:/home/dsh/.cargo/bi
 #    刻意**不**装 tcpdump/iftop/mtr: 容器 CapEff 无 CAP_NET_RAW(实测
 #    0x201000=cap_net_admin,cap_sys_admin), 抓包套接字打不开, 装了也只会让
 #    使用者以为能用。shellcheck 是开发工具(bookworm 起不再有 just 包, 见上);
-#    另有 openssh-server(只有显式开启 DSH_SSH_ENABLED 才会启动)与随镜像发布的
-#    插件载荷 /opt/dsh-plugins(见"插件载荷")。
+#    另有 openssh-server(只有显式开启 DSH_SSH_ENABLED 才会启动)。
+#    第三方插件作为独立 Release 附件交付。
 # ---------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -262,10 +256,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #    subuid/subgid 必须幂等: Debian 的 useradd 建用户时会自动分配从属 ID 区间,
 #    再无条件 echo 一行会得到重复项 —— newuidmap 据此构造出重叠映射, 内核以
 #    Invalid argument 拒绝写入 uid_map, rootless podman 连用户命名空间都建不了。
+#    无 PAM 的 sshd 拒绝锁定账户；不可匹配的 * 密码保留无密码登录的限制，允许公钥认证。
 # ---------------------------------------------------------------------------
 RUN groupadd --gid $USER_GID $USERNAME \
     && useradd --uid $USER_UID --gid $USER_GID -m -s /bin/bash $USERNAME \
-    && usermod -aG sudo $USERNAME \
+    && usermod -p '*' -aG sudo $USERNAME \
     && echo '%sudo ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/$USERNAME \
     && chmod 0440 /etc/sudoers.d/$USERNAME \
     && grep -q "^$USERNAME:100000:65536$" /etc/subuid || echo "$USERNAME:100000:65536" >> /etc/subuid \
@@ -359,14 +354,14 @@ RUN set -eux; \
 # 7. 入口、dsh web 守护/重启、插件登记脚本、可选 sshd 配置与容器适配插件
 #    (适配插件 = 全部进程内适配逻辑的唯一维护点, 见 container/plugin/)
 # ---------------------------------------------------------------------------
+COPY container/dsh.sh /usr/local/bin/dsh
 COPY container/entrypoint.sh /usr/local/bin/entrypoint
 COPY container/dsh-web.sh /usr/local/bin/dsh-web
 COPY container/dsh-restart.sh /usr/local/bin/dsh-restart
 COPY container/healthcheck.sh /usr/local/bin/healthcheck
-COPY container/dsh-plugins-seed.sh /usr/local/bin/dsh-plugins-seed
 COPY container/sshd_config /etc/ssh/sshd_config.dsh
 COPY container/plugin /opt/dsh-container-plugin
-RUN chmod 755 /usr/local/bin/entrypoint /usr/local/bin/dsh-web /usr/local/bin/dsh-restart /usr/local/bin/healthcheck /usr/local/bin/dsh-plugins-seed \
+RUN chmod 755 /usr/local/bin/dsh /usr/local/bin/entrypoint /usr/local/bin/dsh-web /usr/local/bin/dsh-restart /usr/local/bin/healthcheck \
     && chmod 644 /etc/ssh/sshd_config.dsh
 
 # ---------------------------------------------------------------------------
@@ -393,38 +388,6 @@ RUN set -eux; \
     PNPM_VERSION="$(node -p "require('/opt/deepseek-harness/package.json').packageManager.split('@')[1]")"; \
     npm install --global --prefix /usr/local --no-fund --no-audit "pnpm@$PNPM_VERSION"; \
     pnpm --version
-
-# ---------------------------------------------------------------------------
-# 10. 插件载荷: 镜像自带的 dsh 插件(精确版本 + 锁文件, 见 container/plugin-payload/)
-#     装进 /opt/dsh-plugins —— 这里只把代码装好, 不碰任何 profile: 首次启动时
-#     dsh-plugins-seed 才把包登记进数据卷 web profile 的 dependencies 与
-#     node_modules 软链, 且**不**写 dsh.profile.bundles(状态 = 已安装未启用,
-#     用户在 设置 > 插件管理器 里一键启用, 全程离线)。
-#     不用 `dsh plugin add` 的原因: 那会把包装进 $DSH_HOME/profiles(数据卷),
-#     镜像升级带不走, 而且要依赖构建期的 profile 状态; 独立 pnpm 工程 + 软链让
-#     "代码归镜像、启用状态归用户"这条边界保持干净。
-#     nodeLinker: hoisted —— 顶层就是真实包目录, profile 里的软链指过来即可解析,
-#     包自身的依赖也在同一层(不依赖虚拟 store 布局); --frozen-lockfile 保证传递
-#     依赖可复现(与第 12 步构建 dsh 本体同一原则)。
-#     /etc/dsh-container/plugins.json 是运行期唯一输入(镜像所有, 0444):
-#     root + 每个包的绝对路径; 构建期顺手校验每个包都真的声明了 dsh.bundle.patch,
-#     否则插件管理器只会把它当普通依赖(装了也启用不了)。
-# ---------------------------------------------------------------------------
-COPY container/plugin-payload /opt/dsh-plugins
-RUN set -eux; \
-    cd /opt/dsh-plugins; \
-    pnpm install --frozen-lockfile --store-dir /tmp/dsh-plugin-store; \
-    rm -rf /tmp/dsh-plugin-store node_modules/.bin; \
-    mkdir -p /etc/dsh-container; \
-    jq -cn --arg root /opt/dsh-plugins --argjson deps "$(jq -c '.dependencies' package.json)" \
-      '{schema:1,root:$root,plugins:($deps|keys|map({name:.,path:($root+"/node_modules/"+.)}))}' \
-      > /etc/dsh-container/plugins.json; \
-    chmod 0444 /etc/dsh-container/plugins.json; \
-    for p in $(jq -r '.plugins[].name' /etc/dsh-container/plugins.json); do \
-      test -f "node_modules/$p/package.json"; \
-      jq -e '.dsh.bundle.patch' "node_modules/$p/package.json" >/dev/null; \
-    done; \
-    cat /etc/dsh-container/plugins.json
 
 # ---------------------------------------------------------------------------
 # 11. 安装 yq(经 uv, 系统层: 与 uv/pnpm/cargo 同属"镜像持有的工具")
@@ -466,7 +429,6 @@ RUN --mount=type=cache,target=/root/.pnpm-store,id=pnpm-store \
     node --disable-warning=ExperimentalWarning --experimental-strip-types \
       /opt/dsh-container-plugin/scripts/refresh-build-record.mjs /opt/deepseek-harness; \
     rm -rf /tmp/dsh-build-tools; \
-    ln -sfn /opt/deepseek-harness/apps/cli/lib/bin.js /usr/local/bin/dsh; \
     chown -R dsh:dsh /opt/deepseek-harness; \
     mkdir -p /etc/dsh-container; \
     # -c 紧凑输出: 冒烟测试按 '"image":"ghcr.io/niyueee/dsh-container"' 精确 grep

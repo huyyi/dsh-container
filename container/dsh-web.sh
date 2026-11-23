@@ -145,6 +145,12 @@ prepare_sshd() {
   # 重写等于轮换主机密钥, 所有客户端都会拒绝连接。生成/属主/权限三步都显式检查:
   # 本函数在 `if prepare_sshd && ...` 的条件上下文里调用, set -e 被挂起, 隐式失败
   # 会被当成成功。
+  # install -d 会以 root 创建缺失的父目录；先确保 .ssh 仍归运行用户所有，
+  # 否则首次启动时后续写 authorized_keys 会因权限不足而失败。
+  if ! sudo -n install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$HOME/.ssh"; then
+    echo "[dsh-web] cannot prepare $HOME/.ssh; SSH stays off" >&2
+    return 1
+  fi
   if ! sudo -n install -d -m 0700 -o root -g root "$SSH_HOST_KEY_DIR" 2>/dev/null; then
     echo "[dsh-web] cannot prepare $SSH_HOST_KEY_DIR (needs passwordless sudo); SSH stays off" >&2
     return 1
@@ -193,7 +199,8 @@ start_sshd() {
   # -o Port 覆盖配置里的 Port(命令行标量选项优先); -E 把 sshd 日志写文件,
   # 排障时 docker exec 查看。sshd 自己 fork 到后台并写 $SSH_PIDFILE, 所以这里
   # 不 tail、不 wait, 由监督循环重启。
-  : > "$SSH_LOG"
+  # root 不能在启用 fs.protected_regular 的 /tmp 中打开普通用户创建的日志。
+  sudo -n install -m 0644 -o root -g root /dev/null "$SSH_LOG" || return 1
   if ! sudo -n /usr/sbin/sshd -f /etc/ssh/sshd_config.dsh -E "$SSH_LOG" -o "Port=$SSH_PORT"; then
     echo "[dsh-web] sshd failed to start; log follows:" >&2
     cat "$SSH_LOG" >&2 2>/dev/null || true
@@ -204,7 +211,7 @@ start_sshd() {
 }
 
 # SC2317: cleanup() 只经下面的 trap 调用, shellcheck 静态看是"不可达", 属误报。
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 cleanup() {
   STOPPING=1
   if [ -n "$CADDY_PID" ]; then

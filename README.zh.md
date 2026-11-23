@@ -44,7 +44,7 @@ sudo systemctl enable --now dsh.service
 | agent 常用工具 | ripgrep、fd、python3、zip、openssh-client、tmux、sqlite3、vim.tiny/nano、less、rsync、wget、tree、htop、tzdata、patch,外加一组诊断工具(dig/nc/socat/traceroute/iperf3、file、ncdu、strace、zstd/lz4、bc、moreutils、pv、uuid-runtime)与 `shellcheck`——全部烘干进系统层,全新容器开箱即用、无需重新下载(运行期 `apt install` 会随容器重建丢失)。不含 `just`:bookworm 没有该包 |
 | 嵌套容器 | 容器内( rootless )podman 已预配置 `XDG_RUNTIME_DIR`、subuid/subgid 与网络/sysctl 默认值;宿主运行时需允许非特权用户命名空间 + `/dev/fuse` + `/dev/net/tun`,且不得对容器的 `/proc` 加 masked/只读子挂载(`--security-opt unmask=ALL`、Quadlet `Unmask=ALL`、Docker `systempaths=unconfined`);嵌套容器内的资源限制(`--memory`/`--cpus`)不生效(cgroup v2 约束)——见 [docs/deployment.md](docs/deployment.md) § In-container podman |
 | dsh | 从官方源码 tag 构建至 `/opt/deepseek-harness`(`DSH_TAG` 可钉版本);运行期无自动更新 |
-| 自带插件 | 四个钉版本的 dsh 插件随镜像发布(`/opt/dsh-plugins`),但**默认不启用**:只在 web profile 里登记为已安装依赖,由你在 设置 → 插件管理器 里逐个开启(无需下载)。细节见 [docs/deployment.md](docs/deployment.md) § Bundled dsh plugins |
+| 离线插件 | 按架构提供 `.tgz` 插件包，作为 GitHub Release 附件发布。见 [docs/deployment.md](docs/deployment.md) § Offline dsh plugins。 |
 | SSH(可选) | `openssh-server` 与一份自包含的仅公钥配置;只有设置 `DSH_SSH_ENABLED` 才启动,主机密钥在数据卷内生成(绝不烘进镜像)——见 [docs/security.md](docs/security.md) § SSH access |
 | 暴露方式 | Caddy 反向代理(`0.0.0.0:3081` → dsh 的 `127.0.0.1:3080`),可选 basic auth |
 | 守护 | `dsh web` 退出自动重启;`docker exec dsh dsh-restart` 手动重启 |
@@ -82,7 +82,6 @@ sudo systemctl enable --now dsh.service
 | `DSH_PROXY_USER` / `DSH_PROXY_PASSWORD` | *(空)* | 对外代理的 basic auth(任何非回环部署都建议启用);成对设置或都不设 |
 | `DSH_TELEMETRY_MODE` | `DISABLED` | OTel 反馈上报策略;`FEEDBACK_ONLY` 恢复上游默认(显式反馈时上传),`DISABLED` 让 OTel 路径留在本地。它**不**控制 DeepSeek 会话日志贡献者([security.md](docs/security.md)) |
 | `DSH_SSH_ENABLED` | *(空)* | 启动可选的仅公钥 SSH 服务端(`1`/`true`/`yes`/`on`)。`DSH_SSH_PORT`(默认 `22`)指定容器内端口,`DSH_SSH_AUTHORIZED_KEYS` 投放公钥;没有公钥时任何人都无法登录 |
-| `DSH_SKIP_PLUGIN_SEED` | *(空)* | `1` 跳过把自带插件登记进 web profile(它们仍留在 `/opt/dsh-plugins`,只是不列出) |
 
 其余全部使用内置默认值——dsh 数据在 `~/.dsh`,工作目录 `$HOME`,可写缓存在 `~/.cargo` / `~/.local/share`,镜像持有的工具在 `/usr/local/bin` 与 `/opt/rust`。整个 `/home/dsh` 是持久化边界:把它作为单一卷挂载;镜像升级替换工具链,从不动数据。细节见 [docs/build.md](docs/build.md) 与 [docs/deployment.md](docs/deployment.md)。
 

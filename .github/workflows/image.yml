@@ -38,8 +38,8 @@ jobs:
       - name: Shell syntax and lint check
         run: |
           set -euo pipefail
-          bash -n container/*.sh tests/*.sh
-          shellcheck --severity=warning container/*.sh tests/*.sh
+          bash -n container/*.sh tests/*.sh scripts/*.sh
+          shellcheck --severity=warning container/*.sh tests/*.sh scripts/*.sh
 
       # 纯文档提交的安全快车道: 只改 *.md / LICENSE 时跳过镜像构建 + 冒烟
       # (省 ~15 分钟), 其余校验照跑。判定完全基于真实 diff, 并且 fail closed:
@@ -220,6 +220,17 @@ jobs:
           fi
           tests/smoke.sh "${{ steps.image.outputs.name }}:${{ github.sha }}" ${args+"${args[@]}"}
 
+      - name: Package and verify offline plugins
+        if: startsWith(github.ref, 'refs/tags/dsh-v')
+        run: scripts/package-plugins.sh "${{ steps.image.outputs.name }}:${{ github.sha }}" "$GITHUB_REF_NAME" "$RUNNER_TEMP/plugin-assets"
+
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/dsh-v')
+        with:
+          name: plugins-amd64
+          compression-level: 0
+          path: ${{ runner.temp }}/plugin-assets/*
+
       # 冒烟通过后才把 amd64 镜像按 digest 推到 GHCR(不打版本 tag):
       # arm64 由原生 runner 并行构建, 最后由 merge job 合并为多架构镜像
       # 并统一打 dsh-v* + <sha> + latest。坏镜像不会拿到任何 tag。
@@ -301,6 +312,15 @@ jobs:
           cache-to: type=gha,mode=max,scope=build-arm64
           build-args: ${{ steps.args.outputs.args }}
 
+      - name: Package and verify offline plugins
+        run: scripts/package-plugins.sh "${{ steps.image.outputs.name }}@${{ steps.publish.outputs.digest }}" "$GITHUB_REF_NAME" "$RUNNER_TEMP/plugin-assets"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugins-arm64
+          compression-level: 0
+          path: ${{ runner.temp }}/plugin-assets/*
+
   # 两个平台的 digest 都就绪后, 合并为一个多架构镜像并统一打版本 tag。
   merge:
     name: Merge multi-arch manifest
@@ -346,6 +366,12 @@ jobs:
       # 本镜像自己的升级/适配说明不在这里逐版重复 —— 持久文档见
       # docs/releasing.md § Release notes 与 § Upgrading data volumes to the
       # image-owned toolchain、docs/deployment.md § 4。
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: plugins-*
+          merge-multiple: true
+          path: plugin-assets
+
       - name: Compose release notes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -378,3 +404,5 @@ jobs:
           body_path: ${{ runner.temp }}/release-body.md
           generate_release_notes: true
           make_latest: true
+          files: plugin-assets/*
+          fail_on_unmatched_files: true

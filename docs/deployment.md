@@ -543,44 +543,48 @@ controller-enabled cgroup subtree that the `dsh` user owns. No in-image change c
 so the docs promise the graceful degradation (containers run, limits are ignored) rather than
 limits that only work on some hosts.
 
-## 8. Bundled dsh plugins
+## 8. Offline dsh plugins
 
-The image carries a small, pinned set of third-party dsh plugins. They are **installed but switched
-off**: a fresh volume gets them registered in the `web` profile's `dependencies` and linked into its
-`node_modules`, but *not* listed in `dsh.profile.bundles`, so none of their code loads until you
-enable it.
+Third-party plugins are distributed separately from the image. The pinned
+[plugin catalog](../plugins/plugins.json) uses `package@version` entries. Each release
+provides `dsh-plugins-<tag>-linux-amd64.tgz` and `dsh-plugins-<tag>-linux-arm64.tgz`,
+plus SHA-256 checksums. Use the archive matching the container architecture and dsh version.
 
-| Plugin | Version | What it adds |
-|---|---|---|
-| `dsh-plugin-guide` | 0.3.33 | DSH plugin-development skill: docs mirror, compatibility matrix, scaffolder/checker CLI |
-| `@linxin666/dsh-client-ui-skill-explorer` | 0.4.6 | Skills panel in the Web UI — browse by source, enable/disable, create/delete |
-| `@changfenhuang/dsh-genui` | 0.12.0 | Inline generative UI from a ` ```dsh-ui ` fence (charts, forms, mermaid, …) |
-| `dsh-skill-explorer` (from `github:wingsky-1/dsh-skill-explorer`) | 0.1.0 | Alternative zero-build skills panel; upstream archived the repository |
+Extract the archive into a persistent location inside `/home/dsh`, then install into an
+existing profile (for example, `web`):
 
-Enable one under **Settings → Plugins**: the manager lists it as installed and disabled, and enabling
-only appends its package name to the profile's bundle list — no download, no network. Disabling is the
-same operation in reverse.
+```sh
+mkdir -p /home/dsh/offline-plugins
+tar -xzf dsh-plugins-<tag>-linux-amd64.tgz -C /home/dsh/offline-plugins
+bash /home/dsh/offline-plugins/install.sh web
+```
 
-Where the code lives, and why:
+The archive root contains `plugins.json`, checksums and the batch installer. Every plugin
+has its own directory under `plugins/`, including development/build dependencies, required peers and an npm
+lockfile. `package.source.json` preserves the publisher manifest before adding missing peers. The catalog records incompatible plugins as skipped, with a reason. Download or
+build failures fail packaging. No plugin is registered automatically at container startup.
 
-- The code is image-owned at `/opt/dsh-plugins`; `container/plugin-payload/` pins exact versions and
-  ships its own `pnpm-lock.yaml`, so plugins upgrade **with the image**.
-- The volume holds only the registration: `~/.dsh/profiles/web/package.json` records a
-  `file:/opt/dsh-plugins/node_modules/<name>` dependency, and `node_modules/<name>` is a symlink to
-  that image path. `dsh-plugins-seed` (run by the entrypoint) maintains both idempotently and
-  **never touches `dsh.profile.bundles`**; a package you installed yourself — a real directory, or a
-  different `file:` path — is left alone.
-- `/etc/dsh-container/plugins.json` is the image-owned manifest the seeding reads; the image build
-  fails if an entry is not a real dsh bundle (`dsh.bundle.patch`).
-- Setting `DSH_SKIP_PLUGIN_SEED=1` skips registration entirely (existing registrations are kept).
+For individual installation, use the absolute path to a plugin directory:
 
-Pinning matters: dsh refuses to load a bundle whose `engines.dsh`/peer requirements exclude the
-running dsh. Three currently popular plugins are therefore **not** shipped — `dsh-full-remote`
-peer-pins the 0.1.x client packages, `dsh-tui` pins the 0.2.0-rc.2 package line, and
-`@linxin666/dsh-web-all` needs its install scripts to run (including a `cloudflared` download).
-Install those yourself with `dsh plugin --profile web add <spec>` (adding
-`allow-version --accept-risk` where dsh reports an incompatibility): they land in the volume, not the
-image.
+```sh
+dsh --profile web plugin add /home/dsh/offline-plugins/plugins/dsh-genui
+```
+
+The image CLI wrapper also accepts upstream’s `dsh plugin --profile web add <path>` ordering.
+
+Keep the extracted directories: local installation links to them. Published npm artifacts
+are used as supplied; source files excluded by their publishers are not reconstructed.
+Dependency lifecycle scripts run during packaging; root lifecycle scripts are suppressed to
+avoid writing outside the plugin directory. Python requirements are collected as wheels for
+the container's system Python. The batch installer creates a local `.venv` without network
+access and configures `dsh-office-kit` to use it. Use the batch installer for Python plugins.
+The office runtime pointer is stored in `~/.dsh/office/config.json`; its environment and wheels
+stay in the plugin directory. External tools such as a browser or LibreOffice may still be
+required by individual plugin features.
+
+When upgrading from images with bundled plugins, remove the old plugin registrations through
+Settings → Plugins before installing replacements. Paths under `/opt/dsh-plugins` disappear in
+new images; existing user-owned plugin directories are unaffected.
 
 ## 9. SSH access
 

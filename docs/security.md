@@ -207,3 +207,8 @@ reach it, and serving them is an explicit step. When you do:
 - if you front it with an external reverse proxy, forward the WebSocket upgrade headers
   (`Upgrade`/`Connection`) and raise the idle timeouts — without them the UI's event streams
   silently fail (see [deployment.md](deployment.md) for a working nginx example).
+
+Third-party plugins are distributed as separate offline Release archives and are never
+automatically installed at container startup. The batch installer verifies archive contents,
+architecture and the exact dsh version. Installed plugins run with the agent's permissions;
+archive checksums detect transfer corruption and do not establish publisher trust.

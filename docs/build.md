@@ -23,11 +23,9 @@ child image). `rustfmt`/`clippy` are installed next to the minimal Rust profile 
 reason; `yq` is installed with `uv tool install` into `/opt/uv-tools` (see
 [deployment.md](deployment.md#installing-tools-that-persist) for why it is the Python `yq`). The
 full rationale and the persistence matrix live in
-[deployment.md](deployment.md) § Built-in tools. Two further image-owned payloads are neither
-"tools" nor "data": `openssh-server` with the standalone `/etc/ssh/sshd_config.dsh` (started only
-with `DSH_SSH_ENABLED`), and the pinned dsh plugin payload in `/opt/dsh-plugins`
-(`container/plugin-payload/`, installed with its own `pnpm-lock.yaml` and registered into the web
-profile as *installed but disabled*) — see [deployment.md](deployment.md) § Bundled dsh plugins.
+[deployment.md](deployment.md) § Built-in tools. The image also provides `openssh-server` with the standalone `/etc/ssh/sshd_config.dsh` (started only
+with `DSH_SSH_ENABLED`). Third-party plugins are separate Release attachments; see
+[deployment.md](deployment.md) § Offline dsh plugins.
 
 Note that `just` is **not** baked in: Debian 12 (bookworm) does not package it, so the repository's
 `justfile` recipes are a host-side convenience.

@@ -20,13 +20,13 @@ container-environment note for that file lives in
 
 | Path | Purpose |
 |---|---|
-| `Containerfile` | Image build: Debian 12 (bookworm) slim base, Node LTS + pnpm, image-owned rust/uv toolchain (`/opt/rust`, `/usr/local/bin` real binaries), apt podman 4.3/crun/Caddy/gh/openssh-server + baked agent CLI tools (ripgrep/fd/python3/ssh/tmux/sqlite3/editors plus a diagnostics set: dig/nc/socat/traceroute/iperf3, file, ncdu, strace, zstd/lz4, shellcheck; **no `just`** — bookworm does not package it), `uv tool`-installed yq (`/opt/uv-tools`), the pinned plugin payload (`/opt/dsh-plugins`), source-built dsh (`/opt/deepseek-harness`), entrypoint |
+| `Containerfile` | Image build: Debian 12 (bookworm) slim base, Node LTS + pnpm, image-owned rust/uv toolchain (`/opt/rust`, `/usr/local/bin` real binaries), apt podman 4.3/crun/Caddy/gh/openssh-server + baked agent CLI tools (ripgrep/fd/python3/ssh/tmux/sqlite3/editors plus a diagnostics set: dig/nc/socat/traceroute/iperf3, file, ncdu, strace, zstd/lz4, shellcheck; **no `just`** — bookworm does not package it), `uv tool`-installed yq (`/opt/uv-tools`), source-built dsh (`/opt/deepseek-harness`), entrypoint |
+| `container/dsh.sh` | CLI wrapper accepting `dsh --profile NAME plugin ...`, forwarding all other arguments to upstream |
 | `container/entrypoint.sh` | Container entrypoint, installed as `/usr/local/bin/entrypoint` |
 | `container/dsh-web.sh` | Stack supervisor: dsh web (mounted with the container-adapt plugin overlay) + session-cookie wait + Caddy reverse proxy (auto-restart) + optional sshd under `DSH_SSH_ENABLED`, installed as `/usr/local/bin/dsh-web` |
 | `container/dsh-restart.sh` | Restart dsh web from inside the container, installed as `/usr/local/bin/dsh-restart` |
-| `container/dsh-plugins-seed.sh` | Registers the image plugin payload into the volume's web profile as *installed but disabled*: records `file:/opt/dsh-plugins/node_modules/<name>` dependencies and `node_modules` symlinks, never edits `dsh.profile.bundles`, leaves user-installed copies alone; installed as `/usr/local/bin/dsh-plugins-seed`, called by the entrypoint (opt out with `DSH_SKIP_PLUGIN_SEED=1`) |
 | `container/sshd_config` | Complete standalone sshd configuration (`sshd -f`, so the distro config is never read): key-only, no root login, no PAM, host keys inside the volume; installed as `/etc/ssh/sshd_config.dsh` |
-| `container/plugin-payload/` | Pinned third-party dsh plugin payload (`package.json` + `pnpm-lock.yaml`, `nodeLinker: hoisted`), copied to `/opt/dsh-plugins` and installed with `--frozen-lockfile`; the build writes `/etc/dsh-container/plugins.json` from it and fails if an entry is not a real `dsh.bundle.patch` bundle |
+| `plugins/plugins.json`, `scripts/*plugins*` | Pinned package@version catalog; container-based, architecture-specific offline Release archives, with per-plugin dev/build dependencies and Python wheels; no third-party plugin seeding at startup |
 | `container/plugin/` | The single container-adaptation point, installed at `/opt/dsh-container-plugin`: the runtime Cordis plugin (`index.js` + `overlay.yml`, mounted via `dsh --patch`, with a Standard-Schema `Config`) bootstraps the session cookie inside the dsh process, hides the headless-hostile "open settings document" button (wraps the `settingsController` service's `describe` so it reports `hasDocument: false`, plus a `documentPath` flip on pre-v0.1.7 tags; upstream's own UI never renders it), contributes the `__DSH_TRANSPORT__ = { ownsHost: true }` row to upstream's structured index-injection table (its only consumer is the client `isLoopback`), serves the build-time-extracted images from `/container-assets/*`, and attaches a logger exporter so its own `ctx.logger` lines reach the container log; `scripts/` holds the three build-time post-processing steps (extract inline images, esbuild minification, build-record refresh) |
 | `examples/compose.yaml`, `examples/dsh.container` | Orchestration examples; they pull the published image and are the user-facing deployment reference |
 | `docs/*.md` | User-facing guides (English): deployment, security, build, releasing, development |
@@ -103,15 +103,7 @@ The entrypoint (`container/entrypoint.sh`) does, in order:
    submounts (`--security-opt unmask=ALL` / `systempaths=unconfined`), otherwise crun cannot
    mount `/proc` inside the nested container (`mount proc: Operation not permitted`); see
    `docs/deployment.md` § In-container podman.
-5. Registers the image plugin payload into the volume's web profile by running `dsh-plugins-seed`
-   (from `container/dsh-plugins-seed.sh`): it initializes the profile through
-   `dsh plugin --profile web version-exemptions` when it does not exist yet (upstream's own
-   `initProfile`, offline), records a `file:/opt/dsh-plugins/node_modules/<name>` dependency for
-   every payload package and links `node_modules/<name>` at the image path, and **never** writes
-   `dsh.profile.bundles` — the plugins stay installed-but-disabled for the user to enable in
-   Settings → Plugins (upstream's `listBundles` reports exactly that state; `reconcile()` does not
-   drop such names). Failures warn only; `DSH_SKIP_PLUGIN_SEED=1` disables the step.
-6. `dsh-web` then brings up the whole service stack (it is the container's supervisor — see
+5. `dsh-web` then brings up the whole service stack (it is the container's supervisor — see
    `container/dsh-web.sh`): it starts `dsh web` on `127.0.0.1:$DSH_WEB_PORT` (output mirrored into
    the container log) mounted with the container-adapt plugin overlay
    (`dsh --patch /opt/dsh-container-plugin/overlay.yml --profile web ...` — the `web` alias
@@ -140,7 +132,7 @@ The entrypoint (`container/entrypoint.sh`) does, in order:
    not a silent no-auth fallback. The Caddyfile is generated at runtime into
    `/tmp/dsh-caddy/Caddyfile`; Caddy restarts itself if it crashes (config errors still fail fast
    at startup).
-7. `dsh-web` supervises `dsh web` and the opt-in sshd: dsh web is restarted when it exits or
+6. `dsh-web` supervises `dsh web` and the opt-in sshd: dsh web is restarted when it exits or
    crashes, and the
    session cookie survives restarts because dsh's signing secret is persisted in the volume (the
    plugin reuses the old cookie while it stays valid). The container has no
@@ -326,13 +318,7 @@ just contract dsh-v0.1.2-rc.1  # static upstream-contract check for one tag
    payload in a headless browser): the client artifacts share one script scope once dsh
    concatenates them, and renaming identifiers there breaks the boot in ways no static check
    catches.
-7. If you touched the plugin payload (`container/plugin-payload/`), the seeding
-   (`container/dsh-plugins-seed.sh`, the entrypoint call, `/etc/dsh-container/plugins.json`) or the
-   SSH support (`container/sshd_config`, the `dsh-web.sh` sshd branch, `DSH_SSH_*`), verify both
-   halves in the built image: the payload installs with `--frozen-lockfile` and every package still
-   declares `dsh.bundle.patch`; the web profile ends up with the `file:` dependencies and
-   `node_modules` symlinks but **no** matching `dsh.profile.bundles` entries (installed, disabled),
-   and enabling one in the plugin manager makes it load without network; the daemon does **not**
-   listen without `DSH_SSH_ENABLED`, and with it set an injected key logs in (`id -un` = `dsh`)
-   while an unauthorized key is refused. `tests/smoke.sh` asserts all of this — run it
-   (`just test`) rather than eyeballing the logs.
+7. For offline plugin packaging, run `scripts/package-plugins.sh IMAGE TAG OUTPUT`:
+   it packages inside the target image and verifies relocated artifacts in a network-disabled
+   container. Each architecture must pass before its archives become Release attachments.
+   For SSH changes, run the existing SSH assertions in `tests/smoke.sh`.

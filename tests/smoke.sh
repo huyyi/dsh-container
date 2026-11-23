@@ -189,35 +189,11 @@ fi
   git lfs version
 ' || die "built-in tool check failed"
 
-# 镜像自带插件载荷(镜像所有, 随镜像升级): 代码在 /opt/dsh-plugins, 清单
-# /etc/dsh-container/plugins.json 由构建期生成; 每个包必须真的声明
-# dsh.bundle.patch, 否则插件管理器只会把它当普通依赖(装了也启用不了)。
+# 第三方插件由独立离线包交付，镜像不再携带或自动登记。
 "$DOCKER" exec "$cid" sh -c '
-  test -s /etc/dsh-container/plugins.json || { echo "plugins.json missing" >&2; exit 1; }
-  test -x /usr/local/bin/dsh-plugins-seed || { echo "dsh-plugins-seed missing" >&2; exit 1; }
-  jq -e ".schema == 1 and (.plugins | length) >= 1" /etc/dsh-container/plugins.json >/dev/null || exit 1
-  for p in $(jq -r ".plugins[].name" /etc/dsh-container/plugins.json); do
-    m="/opt/dsh-plugins/node_modules/$p/package.json"
-    test -f "$m" || { echo "payload package missing: $p" >&2; exit 1; }
-    jq -e ".dsh.bundle.patch" "$m" >/dev/null || { echo "payload package is not a dsh bundle: $p" >&2; exit 1; }
-  done
-' || die "image plugin payload check failed"
-
-# 登记状态 = 已安装但未启用: entrypoint 经 dsh-plugins-seed 写了 profile 的
-# dependencies 与 node_modules 软链, 但**不**动 dsh.profile.bundles —— 启用是
-# 用户在 设置 > 插件管理器 里的动作(docs/deployment.md § Bundled dsh plugins)。
-"$DOCKER" exec "$cid" sh -c '
-  profile="${DSH_HOME:-$HOME/.dsh}/profiles/web"
-  test -f "$profile/package.json" || { echo "web profile not initialized" >&2; exit 1; }
-  for p in $(jq -r ".plugins[].name" /etc/dsh-container/plugins.json); do
-    test -f "$profile/node_modules/$p/package.json" || { echo "plugin not linked into the profile: $p" >&2; exit 1; }
-    jq -e --arg p "$p" ".dependencies[\$p]" "$profile/package.json" >/dev/null \
-      || { echo "plugin dependency not recorded: $p" >&2; exit 1; }
-    jq -e --arg p "$p" "[.dsh.profile.bundles[] | select(. == \$p)] | length == 0" "$profile/package.json" >/dev/null \
-      || { echo "image plugin must stay disabled by default: $p" >&2; exit 1; }
-  done
-  jq -e "[.dsh.profile.bundles[]] | index(\"@deepseek-ai/dsh-web-app\") != null" "$profile/package.json" >/dev/null || exit 1
-' || die "image plugin registration check failed"
+  test ! -e /opt/dsh-plugins &&
+  test ! -e /usr/local/bin/dsh-plugins-seed
+' || die "removed plugin payload still present"
 
 # SSH 是 opt-in: 服务端与独立配置必须在镜像里, 但默认既不监听也不生成主机密钥
 # (只有 DSH_SSH_ENABLED=1 时 dsh-web 才会拉起它; 见 docs/security.md "SSH access")。
@@ -382,9 +358,10 @@ index_alt_host="$(curl -fsS -H 'Host: dsh.test' http://127.0.0.1:3081/)" \
   || die "Host: dsh.test index lacks the transport injection in <head>"
 # 容器适配插件(container/plugin/)必须随镜像安装: 会话 cookie 自举、传输层注入、
 # 抽图路由与三个构建期后处理脚本都在插件包内。
-"$DOCKER" exec "$cid" sh -c 'test -f /opt/dsh-container-plugin/index.js && test -f /opt/dsh-container-plugin/overlay.yml && test -f /opt/dsh-container-plugin/scripts/extract-inline-assets.js && test -f /opt/dsh-container-plugin/scripts/minify-client.mjs && test -f /opt/dsh-container-plugin/scripts/refresh-build-record.mjs && test -d /opt/dsh-container-plugin/assets' \
+"$DOCKER" exec "$cid" sh -c 'test -f /opt/dsh-container-plugin/index.js && test -f /opt/dsh-container-plugin/overlay.yml && test -f /opt/dsh-container-plugin/scripts/extract-inline-assets.js && test -f /opt/dsh-container-plugin/scripts/minify-client.mjs && test -f /opt/dsh-container-plugin/scripts/refresh-build-record.mjs' \
   || die "container-adapt plugin files missing in the image"
 
+# 上游若不再内联大图，assets 目录可以不存在；以下按实际引用校验路由。
 # 客户端产物: 内联大图必须已抽成 /container-assets/<内容哈希> 文件, 产物必须已
 # 压缩(minify 后处理)。合并包是 settings-account 所在的那个 57 模块 combo。
 combo_url="$(grep -oE "plugins/\?\?[^\"' ]*" <<<"$index_html" | grep -m1 'dsh-client-ui-settings-account' || true)"
@@ -555,7 +532,7 @@ done
   || { "$DOCKER" logs --tail 40 "$ssh_cid" >&2 || true; die "sshd did not start with DSH_SSH_ENABLED=1"; }
 # 主机密钥在数据卷路径上, 且必须是 root 属主 0600(root sshd 会拒绝其他属主)。
 "$DOCKER" exec "$ssh_cid" sh -c \
-  '[ "$(stat -c %U:%a /home/dsh/.ssh/host/ssh_host_ed25519_key)" = "root:600" ]' \
+  '[ "$(sudo -n stat -c %U:%a /home/dsh/.ssh/host/ssh_host_ed25519_key)" = "root:600" ]' \
   || die "SSH host key is not root-owned 0600 inside the volume"
 if command -v ssh >/dev/null 2>&1; then
   ssh_login=""

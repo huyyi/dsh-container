@@ -121,6 +121,11 @@ jobs:
           node --check container/plugin/scripts/minify-client.mjs
           node --check container/plugin/scripts/refresh-build-record.mjs
 
+      - name: Registry import export and publication contract
+        run: |
+          node --check scripts/registry-tarballs.mjs
+          python3 tests/registry-plugins.py
+
       - name: Validate compose example
         run: docker compose -f examples/compose.yaml config --quiet
 

@@ -41,6 +41,8 @@ lint:
     bash -n container/*.sh tests/*.sh scripts/*.sh
     shellcheck container/*.sh tests/*.sh scripts/*.sh
     python3 tests/validate-docs.py
+    node --check scripts/registry-tarballs.mjs
+    python3 tests/registry-plugins.py
 
 # 在目标镜像中生成离线插件包并验证断网安装
 package-plugins image tag output:

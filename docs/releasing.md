@@ -293,3 +293,11 @@ Offline plugin archives are built inside each native architecture's target image
 Python wheels. A relocated extraction must install in a network-disabled container before the
 archive is uploaded; both architecture jobs must pass before the release is created. Catalog
 entries rejected by the host compatibility rules are recorded as skipped.
+
+The same packaging command produces separate `dsh-plugin-registry-<tag>-linux-<arch>.tgz`
+archives and checksums. These contain deduplicated original npm tarballs, including installed
+runtime and dev/build dependency closures, plus a verified, idempotent internal-registry importer.
+The packaging job verifies these archives without network before uploading them alongside the
+existing offline directory archives. Extra lifecycle downloads, Python wheels and build caches
+are excluded. Run `python3 tests/registry-plugins.py` to test export and publication against a
+local registry fixture; this test never publishes to an external registry.

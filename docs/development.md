@@ -11,6 +11,13 @@ container/
   dsh-restart.sh         # restart dsh web inside the container, installed as /usr/local/bin/dsh-restart
   healthcheck.sh         # container HEALTHCHECK: dsh web + Caddy reachability, installed as /usr/local/bin/healthcheck
   plugin/                # container-adapt plugin at /opt/dsh-container-plugin: cookie bootstrap, settings-document button hide, __DSH_TRANSPORT__ index injection, /container-assets route; scripts/ holds the three build-time post-processing steps (extract inline images, esbuild minify, build-record refresh)
+plugins/
+  plugins.json           # pinned plugin@version catalog
+scripts/
+  package-plugins.sh     # directory and original npm registry archives, per architecture
+  registry-plugins.py    # lockfile-driven original tarball export
+  registry-tarballs.mjs  # original npm cache reads with integrity-checked download fallback
+  import-registry.py    # explicit internal-registry import, verification and deduplication
 examples/
   compose.yaml           # Docker Compose example (pulls the image)
   dsh.container          # systemd Quadlet example (pulls the image)
@@ -18,6 +25,7 @@ tests/
   smoke.sh               # end-to-end image smoke test (CI + `just test`)
   contract.sh            # static upstream-contract check against a dsh-v* tag
   triage-diff.sh         # code-level agent admission gate for release-prep (diff triage)
+  registry-plugins.py    # local npm registry export/import contract; no external publication
   plugin-unit.mjs        # container-adapt plugin contract (injection row, Config, route, logger)
 prompts/
   release-prep.md        # system prompt for the headless dsh release agent
@@ -42,7 +50,10 @@ justfile                 # build / debug / restart / test / contract recipes
 Run before committing (the CI runs the same checks):
 
 ```sh
-bash -n container/*.sh tests/*.sh                     # shell syntax
+bash -n container/*.sh tests/*.sh scripts/*.sh          # shell syntax
+shellcheck container/*.sh tests/*.sh scripts/*.sh
+node --check scripts/registry-tarballs.mjs
+python3 tests/registry-plugins.py                      # local registry fixture
 docker compose -f examples/compose.yaml config --quiet
 just --list                                           # justfile parses
 python3 - <<'PY'                                      # README parity

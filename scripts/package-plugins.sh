@@ -14,13 +14,19 @@ if [ ! -d "$cache" ]; then
   mkdir -p "$cache"
   chmod 777 "$cache"
 fi
-docker run --rm -v "$cache:/npm-cache" -e npm_config_cache=/npm-cache --entrypoint python3 -v "$repo:/src:ro" -v "$stage:/out" "$image" \
-  /src/scripts/package-plugins.py /src/plugins/plugins.json /out/payload
+docker run --rm -v "$cache:/npm-cache" -e npm_config_cache=/npm-cache --entrypoint bash -v "$repo:/src:ro" -v "$stage:/out" "$image" \
+  -euc 'python3 /src/scripts/package-plugins.py /src/plugins/plugins.json /out/payload
+         python3 /src/scripts/registry-plugins.py /out/payload /out/registry'
 arch="$(docker run --rm --entrypoint uname "$image" -m)"
 case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) exit 1 ;; esac
 archive="dsh-plugins-$tag-linux-$arch.tgz"
+registry_archive="dsh-plugin-registry-$tag-linux-$arch.tgz"
 # GitHub runner 的 uid 不一定是 1000；确保宿主能读取容器生成的物料。
-docker run --rm --user 0 --entrypoint chmod -v "$stage:/work" "$image" -R a+rX /work/payload
+docker run --rm --user 0 --entrypoint chmod -v "$stage:/work" "$image" -R a+rX /work/payload /work/registry
+docker run --rm --network none --entrypoint python3 -v "$stage/registry:/registry:ro" "$image" \
+  /registry/import-registry.py --verify-only
+tar -czf "$output/$registry_archive" -C "$stage/registry" .
+docker run --rm --user 0 --entrypoint rm -v "$stage:/work" "$image" -rf /work/registry
 tar -czf "$output/$archive" -C "$stage/payload" .
 docker run --rm --user 0 --entrypoint rm -v "$stage:/work" "$image" -rf /work/payload
 mkdir "$stage/relocated"
@@ -30,4 +36,5 @@ docker run --rm --network none --entrypoint bash -v "$stage/relocated:/home/dsh/
   dsh plugin --profile web version-exemptions
   bash /home/dsh/offline/install.sh web
 '
-(cd "$output" && sha256sum "$archive" > "$archive.sha256")
+(cd "$output" && sha256sum "$archive" > "$archive.sha256"
+ sha256sum "$registry_archive" > "$registry_archive.sha256")

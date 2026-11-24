@@ -26,7 +26,7 @@ container-environment note for that file lives in
 | `container/dsh-web.sh` | Stack supervisor: dsh web (mounted with the container-adapt plugin overlay) + session-cookie wait + Caddy reverse proxy (auto-restart) + optional sshd under `DSH_SSH_ENABLED`, installed as `/usr/local/bin/dsh-web` |
 | `container/dsh-restart.sh` | Restart dsh web from inside the container, installed as `/usr/local/bin/dsh-restart` |
 | `container/sshd_config` | Complete standalone sshd configuration (`sshd -f`, so the distro config is never read): key-only, no root login, no PAM, host keys inside the volume; installed as `/etc/ssh/sshd_config.dsh` |
-| `plugins/plugins.json`, `scripts/*plugins*` | Pinned package@version catalog; container-based, architecture-specific offline Release archives, with per-plugin dev/build dependencies and Python wheels; no third-party plugin seeding at startup |
+| `plugins/plugins.json`, `scripts/*plugins*`, `scripts/*registry*` | Pinned package@version catalog; container-based, architecture-specific offline Release archives, with per-plugin dev/build dependencies and Python wheels, plus separate original npm tarball registry-import archives excluding extra downloads; no third-party plugin seeding at startup |
 | `container/plugin/` | The single container-adaptation point, installed at `/opt/dsh-container-plugin`: the runtime Cordis plugin (`index.js` + `overlay.yml`, mounted via `dsh --patch`, with a Standard-Schema `Config`) bootstraps the session cookie inside the dsh process, hides the headless-hostile "open settings document" button (wraps the `settingsController` service's `describe` so it reports `hasDocument: false`, plus a `documentPath` flip on pre-v0.1.7 tags; upstream's own UI never renders it), contributes the `__DSH_TRANSPORT__ = { ownsHost: true }` row to upstream's structured index-injection table (its only consumer is the client `isLoopback`), serves the build-time-extracted images from `/container-assets/*`, and attaches a logger exporter so its own `ctx.logger` lines reach the container log; `scripts/` holds the three build-time post-processing steps (extract inline images, esbuild minification, build-record refresh) |
 | `examples/compose.yaml`, `examples/dsh.container` | Orchestration examples; they pull the published image and are the user-facing deployment reference |
 | `docs/*.md` | User-facing guides (English): deployment, security, build, releasing, development |
@@ -291,10 +291,12 @@ just contract dsh-v0.1.2-rc.1  # static upstream-contract check for one tag
 
 ## Validation checklist before committing
 
-1. `just lint` — runs all three of: `bash -n container/*.sh tests/*.sh`,
+1. `just lint` — runs the shell/doc gates: `bash -n container/*.sh tests/*.sh`,
    `shellcheck container/*.sh tests/*.sh` (must be zero output, including info-level
    diagnostics; annotate genuine false positives with a targeted `# shellcheck disable=`), and
-   `python3 tests/validate-docs.py`. CI runs the same three as separate steps.
+   `python3 tests/validate-docs.py`. CI runs the same gates as separate steps. It also checks `scripts/registry-tarballs.mjs`
+   and runs the local-registry fixture `python3 tests/registry-plugins.py` (requires Node/npm and
+   a localhost listener; no external registry publication).
 2. Examples parse: `docker compose -f examples/compose.yaml config --quiet` (or podman-compose)
 3. README/README.zh parity: equal heading count, link count, and code-fence count
    (`python3 tests/validate-docs.py parity`)
@@ -321,4 +323,6 @@ just contract dsh-v0.1.2-rc.1  # static upstream-contract check for one tag
 7. For offline plugin packaging, run `scripts/package-plugins.sh IMAGE TAG OUTPUT`:
    it packages inside the target image and verifies relocated artifacts in a network-disabled
    container. Each architecture must pass before its archives become Release attachments.
+   Run `python3 tests/registry-plugins.py` for original tarball export, local registry publication,
+   idempotency, scope routing and integrity/conflict checks (no external publication).
    For SSH changes, run the existing SSH assertions in `tests/smoke.sh`.

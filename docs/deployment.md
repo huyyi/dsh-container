@@ -586,6 +586,41 @@ When upgrading from images with bundled plugins, remove the old plugin registrat
 Settings → Plugins before installing replacements. Paths under `/opt/dsh-plugins` disappear in
 new images; existing user-owned plugin directories are unaffected.
 
+### Importing npm packages into an internal registry
+
+The packaging job also produces `dsh-plugin-registry-<tag>-linux-amd64.tgz` and
+`dsh-plugin-registry-<tag>-linux-arm64.tgz`, each with a `.sha256` file. Extract either archive
+and use its import script on a machine with Python 3.9+ and npm:
+
+```sh
+mkdir registry-import
+tar -xzf dsh-plugin-registry-<tag>-linux-amd64.tgz -C registry-import
+bash registry-import/import.sh --verify-only
+npm login --registry https://npm.internal.example/
+bash registry-import/import.sh https://npm.internal.example/
+```
+
+`packages.json` indexes original npm tarballs under `packages/`, with package identity,
+source integrity, SHA-256, SHA-512, SHA-1 and the plugins using each package. The exporter
+reads exact tarballs from npm's content cache (downloading the original source if missing),
+checks their integrity and identity, and deduplicates by `name@version`. It includes the plugin
+itself and installed runtime, dev/build, peer and transitive dependencies. Only optional packages
+installed for that architecture are exported; import **both** architecture archives to supply
+both amd64 and arm64 clients. Dependencies already bundled in a published tarball stay inside it.
+
+Import validates every tarball before publishing. Existing versions with identical contents
+are skipped, allowing both architecture archives and retries to share a registry. A version
+with different contents fails instead of being overwritten; authentication and server errors
+also fail. The script uses npm's configured credentials, explicitly directs scopes to the supplied
+registry, suppresses lifecycle scripts and provenance generation, and publishes under the `offline-import` dist-tag.
+Install plugins using explicit `plugin@version` specifications and configure clients (including
+any scope-specific registry settings) to use the internal registry.
+
+These import archives contain original **npm packages only**. Python wheels, local virtual
+environments, build caches and additional downloads performed by lifecycle scripts are excluded.
+Installation scripts may still need separately supplied external tools or downloads. Installed
+`node_modules` are never repacked and passed off as the original registry package.
+
 ## 9. SSH access
 
 SSH is **off by default**. Reaching the proxy on 3081 stays the normal remote path; enabling SSH adds

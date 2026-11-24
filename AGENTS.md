@@ -20,7 +20,7 @@ container-environment note for that file lives in
 
 | Path | Purpose |
 |---|---|
-| `Containerfile` | Image build: Debian 12 (bookworm) slim base, Node LTS + pnpm, image-owned rust/uv toolchain (`/opt/rust`, `/usr/local/bin` real binaries), apt podman 4.3/crun/Caddy/gh/openssh-server + baked agent CLI tools (ripgrep/fd/python3/ssh/tmux/sqlite3/editors plus a diagnostics set: dig/nc/socat/traceroute/iperf3, file, ncdu, strace, zstd/lz4, shellcheck; **no `just`** — bookworm does not package it), `uv tool`-installed yq (`/opt/uv-tools`), source-built dsh (`/opt/deepseek-harness`), entrypoint |
+| `Containerfile` | Image build: Debian 12 (bookworm) slim base, Node LTS + pnpm, image-owned rust/uv toolchain (`/opt/rust`, `/usr/local/bin` real binaries), apt podman 4.3/crun/Caddy/gh/openssh-server + baked agent CLI tools (ripgrep/fd/python3/ssh/tmux/sqlite3/editors plus a diagnostics set: dig/nc/socat/traceroute/iperf3, file, ncdu, strace, zstd/lz4, shellcheck; **no `just`** — bookworm does not package it), `uv tool`-installed yq (`/opt/uv-tools`), source-built dsh (`/opt/deepseek-harness`, default `DSH_TAG=dsh-v0.2.2-rc.5`; release tags select their matching upstream version), entrypoint |
 | `container/dsh.sh` | CLI wrapper accepting `dsh --profile NAME plugin ...`, forwarding all other arguments to upstream |
 | `container/entrypoint.sh` | Container entrypoint, installed as `/usr/local/bin/entrypoint` |
 | `container/dsh-web.sh` | Stack supervisor: dsh web (mounted with the container-adapt plugin overlay) + session-cookie wait + Caddy reverse proxy (auto-restart) + optional sshd under `DSH_SSH_ENABLED`, installed as `/usr/local/bin/dsh-web` |

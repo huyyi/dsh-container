@@ -17,10 +17,10 @@
 #
 # 可复现性: 基础镜像 tag、rust 工具链、uv 版本、dsh 源码 tag 均可通过构建参数固定;
 # pnpm 版本从所构建 tag 的 packageManager 读取并安装到系统层。Caddy/podman 来自
-# apt 仓库, dsh 依赖树由官方 pnpm-lock.yaml 锁定, 默认构建安装官方最新 tag。
-# 生产发布建议固定 DSH_TAG:
+# apt 仓库, dsh 依赖树由官方 pnpm-lock.yaml 锁定, 默认构建固定到 dsh-v0.2.2-rc.5。
+# 需要其他版本时显式覆盖 DSH_TAG:
 #   podman build --format docker \
-#                --build-arg DSH_TAG=dsh-v0.1.2-alpha.4 \
+#                --build-arg DSH_TAG=dsh-v0.2.2-rc.5 \
 #                --build-arg RUST_TOOLCHAIN=1.88.0 \
 #                -t dsh-container .
 # BUILD_VERSION 写入 OCI 版本 label: CI 打 dsh-v* tag 时传官方仓库 tag,
@@ -111,7 +111,7 @@ ARG BASE_IMAGE=debian:12-slim
 
 FROM ${BASE_IMAGE}
 
-ARG DSH_TAG=latest
+ARG DSH_TAG=dsh-v0.2.2-rc.5
 ARG BUILD_VERSION=latest
 ARG RUST_TOOLCHAIN=stable
 ARG UV_VERSION=latest
@@ -365,7 +365,7 @@ RUN chmod 755 /usr/local/bin/dsh /usr/local/bin/entrypoint /usr/local/bin/dsh-we
     && chmod 644 /etc/ssh/sshd_config.dsh
 
 # ---------------------------------------------------------------------------
-# 8. 拉取 dsh 官方源码并切换到指定 tag(默认 latest = 官方最新 tag)
+# 8. 拉取 dsh 官方源码并切换到指定 tag(默认固定；显式传 latest 才追踪最新 tag)
 # ---------------------------------------------------------------------------
 RUN set -eux; \
     git clone --filter=blob:none --no-checkout https://github.com/deepseek-ai/deepseek-harness.git /opt/deepseek-harness; \

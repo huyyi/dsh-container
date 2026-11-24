@@ -18,7 +18,8 @@ collides with older container-image tags such as `v0.2.2`.
 Pushing to GitHub triggers [`.github/workflows/image.yml`](../.github/workflows/image.yml):
 
 - **main / PR / manual dispatch**: build (amd64) + smoke test a temporary image only — **nothing is pushed
-  to GHCR**. CI validates that the image is usable, nothing more.
+  to GHCR**. These builds use the pinned upstream `dsh-v0.2.2-rc.5`; the repository variable
+  `DSH_TAG` is not consulted.
 - **`dsh-v*` tag (release)**: the workflow checks out the matching upstream
   `deepseek-ai/deepseek-harness` tag (`DSH_TAG=<tag>`), runs the static upstream-contract check
   (`tests/contract.sh --tag <tag>`) as a publish gate, builds and smoke-tests the amd64 image, and
@@ -73,8 +74,9 @@ For local/manual builds, pin directly with `--build-arg DSH_TAG=dsh-v0.1.2-alpha
 
 ## Tracking upstream releases
 
-There is no version pin in this repository to bump: a release exists as soon as the matching
-upstream tag is pushed here. Two automated helpers keep the repository in sync with upstream:
+The default build pin is `dsh-v0.2.2-rc.5`. Release-tag builds explicitly select the matching
+upstream tag, so publishing another upstream version does not require changing that default.
+Two automated helpers keep the repository in sync with upstream:
 
 ### Upstream tag watcher (`.github/workflows/upstream-tag.yml`)
 
@@ -111,7 +113,7 @@ tag push or manual dispatch.
   (Actions needs a few minutes to create the run); the daily schedule picks it up.
 
 The upstream repository can be overridden with the `DSH_UPSTREAM_REPO` repository variable
-(default `deepseek-ai/deepseek-harness`), mirroring `vars.DSH_TAG` in `image.yml`. To re-check on
+(default `deepseek-ai/deepseek-harness`). To re-check on
 demand, run "Upstream dsh tag watch" → "Run workflow" from the Actions tab.
 
 ### Automated release preparation (`.github/workflows/release-prep.yml`)

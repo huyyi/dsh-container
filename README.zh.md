@@ -43,7 +43,7 @@ sudo systemctl enable --now dsh.service
 | 工具链 | Node.js 22 LTS、pnpm、uv、Rust/cargo(含 rustfmt/clippy)、git + git-lfs、build-essential、Caddy、podman 4.3 + crun、gh、yq——镜像持有的真实二进制,随镜像升级 |
 | agent 常用工具 | ripgrep、fd、python3、zip、openssh-client、tmux、sqlite3、vim.tiny/nano、less、rsync、wget、tree、htop、tzdata、patch,外加一组诊断工具(dig/nc/socat/traceroute/iperf3、file、ncdu、strace、zstd/lz4、bc、moreutils、pv、uuid-runtime)与 `shellcheck`——全部烘干进系统层,全新容器开箱即用、无需重新下载(运行期 `apt install` 会随容器重建丢失)。不含 `just`:bookworm 没有该包 |
 | 嵌套容器 | 容器内( rootless )podman 已预配置 `XDG_RUNTIME_DIR`、subuid/subgid 与网络/sysctl 默认值;宿主运行时需允许非特权用户命名空间 + `/dev/fuse` + `/dev/net/tun`,且不得对容器的 `/proc` 加 masked/只读子挂载(`--security-opt unmask=ALL`、Quadlet `Unmask=ALL`、Docker `systempaths=unconfined`);嵌套容器内的资源限制(`--memory`/`--cpus`)不生效(cgroup v2 约束)——见 [docs/deployment.md](docs/deployment.md) § In-container podman |
-| dsh | 从官方源码 tag 构建至 `/opt/deepseek-harness`(`DSH_TAG` 可钉版本);运行期无自动更新 |
+| dsh | 从官方源码 tag 构建至 `/opt/deepseek-harness`(默认 `DSH_TAG=dsh-v0.2.2-rc.5`);运行期无自动更新 |
 | 离线插件 | 按架构提供 `.tgz` 目录插件包及原始 npm 包导入物料，作为 GitHub Release 附件发布。见 [docs/deployment.md](docs/deployment.md) § Offline dsh plugins。 |
 | SSH(可选) | `openssh-server` 与一份自包含的仅公钥配置;只有设置 `DSH_SSH_ENABLED` 才启动,主机密钥在数据卷内生成(绝不烘进镜像)——见 [docs/security.md](docs/security.md) § SSH access |
 | 暴露方式 | Caddy 反向代理(`0.0.0.0:3081` → dsh 的 `127.0.0.1:3080`),可选 basic auth |

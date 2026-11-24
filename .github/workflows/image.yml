@@ -176,13 +176,11 @@ jobs:
         run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       # 本仓库 release tag 与官方仓库 tag 完全一致(如 dsh-v0.1.2-alpha.3);
-      # DSH_TAG 与 BUILD_VERSION 都直接使用该 tag。非发布构建 label 为 latest。
+      # 发布构建的 DSH_TAG 与 BUILD_VERSION 使用该 tag；非发布构建固定上游版本，label 为 latest。
       - name: Compute build args
         id: args
-        env:
-          DSH_TAG_REPO: ${{ vars.DSH_TAG || 'latest' }}
         run: |
-          dsh_tag="$DSH_TAG_REPO"
+          dsh_tag="dsh-v0.2.2-rc.5"
           label="latest"
           if [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" == dsh-v* ]]; then
             dsh_tag="${{ github.ref_name }}"
@@ -284,10 +282,8 @@ jobs:
 
       - name: Compute build args
         id: args
-        env:
-          DSH_TAG_REPO: ${{ vars.DSH_TAG || 'latest' }}
         run: |
-          dsh_tag="$DSH_TAG_REPO"
+          dsh_tag="dsh-v0.2.2-rc.5"
           label="latest"
           if [[ "${{ github.ref_type }}" == "tag" && "${{ github.ref_name }}" == dsh-v* ]]; then
             dsh_tag="${{ github.ref_name }}"

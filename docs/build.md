@@ -1,0 +1,98 @@
+# Build Configuration & Version Pinning
+
+The base image and dsh source tag (`dsh-v0.2.2-rc.5`) are pinned by default. The dsh tag,
+Rust toolchain and uv version can be overridden with `--build-arg`. uv is installed by the
+official standalone installer script (the same pattern as rustup; `UV_VERSION` pins it, `latest` resolves the newest release at build time); pnpm
+is installed at the version required by the checked-out dsh tag (read from its `packageManager`
+field). All three are image-owned real binaries in the system layer (`/usr/local/bin`,
+`/opt/rust`; the one writable exception is rustup's home `/opt/rust/rustup`, which rustup must
+write at runtime — it is built `dsh`-owned and the entrypoint repairs its ownership on every
+start), so tool versions are a property of the image tag, not of the volume. Caddy/podman/gh come
+from apt; dsh is built from the official repository with its `pnpm-lock.yaml`. Default builds
+use the fixed `dsh-v0.2.2-rc.5` source and its upstream lockfile.
+
+Alongside the toolchain, the image bakes an agent's high-frequency CLI tools into the system layer
+(`ripgrep`, `fd`, `python3`, `zip`, `openssh-client`, `tmux`, `sqlite3`, `vim.tiny`, `nano`,
+`less`, `rsync`, `wget`, `tree`, `htop`, `tzdata`, `patch`, `git-lfs`, plus `crun` for nested
+rootless podman, and a diagnostics set: `dig`/`nc`/`socat`/`traceroute`/`iperf3`, `file`, `ncdu`,
+`strace`, `zstd`/`lz4`, `bc`, `moreutils`, `pv`, `uuid-runtime`). Runtime `apt install` writes the
+container's writable layer and is lost on
+container recreation, so anything that must persist is installed at build time (or added via a
+child image). `rustfmt`/`clippy` are installed next to the minimal Rust profile for the same
+reason; `yq` is installed with `uv tool install` into `/opt/uv-tools` (see
+[deployment.md](deployment.md#installing-tools-that-persist) for why it is the Python `yq`). The
+full rationale and the persistence matrix live in
+[deployment.md](deployment.md) § Built-in tools. The image also provides `openssh-server` with the standalone `/etc/ssh/sshd_config.dsh` (started only
+with `DSH_SSH_ENABLED`). Third-party plugins are separate Release attachments; see
+[deployment.md](deployment.md) § Offline dsh plugins.
+
+Note that `just` is **not** baked in: Debian 12 (bookworm) does not package it, so the repository's
+`justfile` recipes are a host-side convenience.
+
+## Build arguments
+
+| Build arg | Default | Description |
+|---|---|---|
+| `BASE_IMAGE` | `debian:12-slim` | Base image (bookworm; pinned for reproducible builds; override only if you also adjust the `/home/dsh` user-layer assumptions) |
+| `DSH_TAG` | `dsh-v0.2.2-rc.5` | Upstream dsh git tag to build (explicitly setting `latest` opts into resolving the newest upstream `dsh-v*` tag at build time). The image is immutable at runtime — there is no in-container dsh auto-update |
+| `BUILD_VERSION` | `latest` | Written to the OCI label `org.opencontainers.image.version`; CI passes the upstream dsh tag on `dsh-v*` tag builds (see [releasing.md](releasing.md)) |
+| `RUST_TOOLCHAIN` | `stable` | Rust toolchain (e.g. `1.88.0`) |
+| `UV_VERSION` | `latest` | uv version installed by the official standalone installer script (`latest` resolves the newest uv release at build time) |
+| `BUILD_GIT_SHA` / `BUILD_GIT_REF` | `unknown` | Written to the OCI labels `org.opencontainers.image.revision` / `org.opencontainers.image.ref.name` |
+
+Toolchain vs. data: the image owns the tools (read-only at runtime — the one exception is rustup's
+home `/opt/rust/rustup`, which rustup must write: it is built `dsh`-owned and self-healed by the
+entrypoint), the volume owns the state.
+
+- Image-owned: uv/uvx and the pnpm binary in `/usr/local/bin`, the Rust toolchain tree in
+  `/opt/rust` (rustup proxies symlinked into `/usr/local/bin`), dsh in `/opt/deepseek-harness`,
+  and `yq`'s `uv tool` virtualenv in `/opt/uv-tools` (shims in `/usr/local/bin`).
+  Tool upgrades happen by image upgrade — `uv self update` cannot write the root-owned
+  `/usr/local/bin`, a runtime `rustup update` would only write the container layer (lost on
+  recreation), and `uv tool upgrade yq` fails against the root-owned `/opt/uv-tools` by design,
+  so runtime updates are not a supported upgrade path.
+- Volume-owned (writable, persisted): `~/.cargo` (cargo registry/cache and `cargo install`
+  binaries), uv data in `~/.local/share/uv` and `~/.cache/uv`, pnpm store and user global
+  packages in `~/.local/share/pnpm` (`PNPM_HOME`) with their executables in `$PNPM_HOME/bin`,
+  anything the user puts in `~/.local/bin`. All of those bin directories are on PATH.
+  User-installed tools sit last on PATH and can never shadow image-provided ones.
+- Custom Rust toolchains: override `RUSTUP_HOME` to a volume directory and run `rustup-init`
+  there (advanced escape hatch; the image-managed toolchain is unaffected).
+
+dsh itself is built into the system layer at `/opt/deepseek-harness` (source tree, `node_modules`,
+and built client/web artifacts). It is replaced on image upgrades and is independent of the
+persisted home volume, so a fresh or empty `/home/dsh` volume never hides `dsh`.
+
+The final image keeps a refreshed apt package index: `apt-get update` runs once more at the end of
+the build and `/var/lib/apt/lists` is preserved, so `apt install` works inside the container without
+a manual update first (the index lives in the system layer and resets on image upgrades). Note that
+the preserved index is a build-time snapshot: as the image ages, installs can start failing with
+404s or hash mismatches — run `sudo apt-get update` inside the container and retry when that
+happens.
+
+Older images seeded toolchain copies into the volume (`~/.local/bin` uv/uvx, the pnpm prefix under
+`~/.local/share/pnpm`, rustup proxies in `~/.cargo/bin`). Those are inert — PATH prefers the
+image-owned binaries and they can never shadow them — but waste space; remove them manually to
+reclaim `~/.rustup`'s ~1GB. The commands live in
+[releasing.md](releasing.md) § Upgrading data volumes to the image-owned toolchain.
+
+The image post-processes the client artifacts after `pnpm run build:official`, inside the build
+layer: they live in the system layer and reset on image upgrades, so they must be regenerated on
+every build. Large inline images are extracted to files served by the container-adapt plugin
+(`/container-assets/*`), the client bundles are minified with a pinned esbuild, and the upstream
+`.dsh-build` client build record is refreshed afterwards so it keeps matching the delivered
+artifacts. All three steps are fail-fast; see `container/plugin/scripts/`.
+
+## Example
+
+With podman, keep `--format docker` so the `HEALTHCHECK` survives (podman's default OCI format
+drops it):
+
+```bash
+podman build --format docker \
+             --build-arg DSH_TAG=dsh-v0.1.2-alpha.4 \
+             --build-arg RUST_TOOLCHAIN=1.88.0 \
+             -t dsh-container .
+```
+
+The resulting image stays on that upstream tag until the next image release.

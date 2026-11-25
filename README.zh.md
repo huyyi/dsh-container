@@ -1,67 +1,100 @@
-# dsh 离线插件
+<div align="center">
 
-在已有宿主镜像内重新打包指定版本的 dsh 插件，然后在内网手动安装产物目录。
-宿主直接使用 [NIyueeE/dsh-container](https://github.com/NIyueeE/dsh-container) 的预构建镜像。
+# dsh Container Image
 
-English | [中文](README.zh.md)
+**[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)(`dsh`)的开箱即用容器——agent、完整工具链与反向代理集成于一个镜像,基于官方源码 tag 构建。**
 
-## 打包
+[![Release](https://img.shields.io/github/v/tag/NIyueeE/dsh-container?filter=dsh-v*&label=release&sort=semver)](https://github.com/NIyueeE/dsh-container/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/NIyueeE/dsh-container/image.yml?branch=main&label=CI)](https://github.com/NIyueeE/dsh-container/actions/workflows/image.yml)
+[![GHCR](https://img.shields.io/badge/ghcr.io-niyueee%2Fdsh--container-2088FF?logo=docker&logoColor=white)](https://github.com/NIyueeE/dsh-container/pkgs/container/dsh-container)
+[![Upstream dsh](https://img.shields.io/github/v/tag/deepseek-ai/deepseek-harness?filter=dsh-v*&label=upstream%20dsh&sort=semver)](https://github.com/deepseek-ai/deepseek-harness)
+[![License](https://img.shields.io/github/license/NIyueeE/dsh-container)](LICENSE)
 
-宿主机仅需 Docker。下载、依赖安装和构建在临时容器中完成，不修改正在使用的 dsh profile。
+[English](README.md) | 中文
 
-```sh
-bash plugin/offline_repack.sh \
-  --image ghcr.io/niyueee/dsh-container:dsh-v0.2.2-rc.2 \
-  --output ./offline-export
+</div>
+
+## 快速开始
+
+### Docker Compose(Linux)
+
+```bash
+docker compose -f examples/compose.yaml up -d
+docker compose logs dsh | grep 'dsh web:'
+# open http://127.0.0.1:3081/ in your local browser (the proxy bootstraps the login)
 ```
 
-[plugin/plugins.json](plugin/plugins.json) 记录精确版本和 `pack_build_deps`。
-初始列表只包含此前已打包的 GenUI 0.16.0 及其内网地图配方，不自动导入旧镜像的预装列表。
-`true` 携带锁定源码和开发依赖，供离线重建；`false` 仅携带已构建代码和运行依赖。
+### Podman Quadlet(Linux,推荐)
 
-每个成功打包的插件生成一个 `插件名-插件版本-dsh-宿主版本` 目录：
-
-```text
-offline-export/
-  changfenhuang--dsh-genui-0.16.0-dsh-0.2.2-rc.2/
-    plugin/
-    build/
-    offline-manifest.json
-    INSTALL.md
-    GENUI.md
-    genui-intranet.patch
+```bash
+sudo mkdir -p /etc/containers/systemd
+sudo cp examples/dsh.container /etc/containers/systemd/
+sudo systemctl daemon-reload
+sudo systemctl enable --now dsh.service
 ```
 
-作用域包名去掉 `@`，将 `/` 替换为 `--`。只有明确要求时才包含 `build/`。
-产物和缓存不入 Git，已有产物不会被覆盖。其他架构或宿主镜像摘要使用不同的输出父目录。
+两个示例都发布 `127.0.0.1:3081`,并把一个卷挂载到 `/home/dsh`——用户层(`~/.dsh`、缓存、自装工具)在镜像升级后保持不变,系统层随镜像更新。没有登录步骤:代理会自动完成 dsh 会话引导。
 
-## 内网安装
+## 镜像内容
 
-传入目录和相同宿主镜像。把 `plugin/` 挂载到 `/home/dsh` 外，例如
-`/opt/offline-plugins/genui`，并保持挂载。在目标容器内执行：
+| 组件 | 说明 |
+|---|---|
+| 基础镜像 | `debian:12-slim`(bookworm;已钉版本,可用 `BASE_IMAGE` 构建参数覆盖) |
+| 工具链 | Node.js 22 LTS、pnpm、uv、Rust/cargo(含 rustfmt/clippy)、git + git-lfs、build-essential、Caddy、podman 4.3 + crun、gh、yq——镜像持有的真实二进制,随镜像升级 |
+| agent 常用工具 | ripgrep、fd、python3、zip、openssh-client、tmux、sqlite3、vim.tiny/nano、less、rsync、wget、tree、htop、tzdata、patch,外加一组诊断工具(dig/nc/socat/traceroute/iperf3、file、ncdu、strace、zstd/lz4、bc、moreutils、pv、uuid-runtime)与 `shellcheck`——全部烘干进系统层,全新容器开箱即用、无需重新下载(运行期 `apt install` 会随容器重建丢失)。不含 `just`:bookworm 没有该包 |
+| 嵌套容器 | 容器内( rootless )podman 已预配置 `XDG_RUNTIME_DIR`、subuid/subgid 与网络/sysctl 默认值;宿主运行时需允许非特权用户命名空间 + `/dev/fuse` + `/dev/net/tun`,且不得对容器的 `/proc` 加 masked/只读子挂载(`--security-opt unmask=ALL`、Quadlet `Unmask=ALL`、Docker `systempaths=unconfined`);嵌套容器内的资源限制(`--memory`/`--cpus`)不生效(cgroup v2 约束)——见 [docs/deployment.md](docs/deployment.md) § In-container podman |
+| dsh | 从官方源码 tag 构建至 `/opt/deepseek-harness`(默认 `DSH_TAG=dsh-v0.2.2-rc.5`);运行期无自动更新 |
+| 离线插件 | 按架构提供 `.tgz` 目录插件包及原始 npm 包导入物料，作为 GitHub Release 附件发布。见 [docs/deployment.md](docs/deployment.md) § Offline dsh plugins。 |
+| SSH(可选) | `openssh-server` 与一份自包含的仅公钥配置;只有设置 `DSH_SSH_ENABLED` 才启动,主机密钥在数据卷内生成(绝不烘进镜像)——见 [docs/security.md](docs/security.md) § SSH access |
+| 暴露方式 | Caddy 反向代理(`0.0.0.0:3081` → dsh 的 `127.0.0.1:3080`),可选 basic auth |
+| 守护 | `dsh web` 退出自动重启;`docker exec dsh dsh-restart` 手动重启 |
+| 远程兼容 | 一个容器适配插件(`container/plugin/`,经 `dsh --patch` 挂载):dsh 进程内会话 cookie 自举、无桌面环境下隐藏"打开配置文件"按钮(`describe` 报告无本地文档)、往服务端索引注入上游的 `__DSH_TRANSPORT__` 传输层归属声明(远程设置/凭据页可用)、`/container-assets/*` 提供构建期抽出的图片 |
+| 可观测性 | OCI labels、`HEALTHCHECK`(curl 3080 + 3081) |
+| 运行用户 | uid 1000(`dsh`),免密 sudo;`/home/dsh` 为持久化用户层 |
 
-```sh
-dsh plugin --profile web add link:/opt/offline-plugins/genui --offline --ignore-scripts
-dsh --profile web --dump-config
-dsh-restart
-```
+## 容器适配插件
 
-dsh 可能直接启用新安装的插件；已有但禁用的插件需要在插件管理器中启用。
-携带构建依赖会增加体积和构建时间。外部服务与模型端点仍需单独配置。
-复用宿主运行依赖要求使用相同镜像摘要和架构。
+对上游 dsh 的全部容器侧适配收敛在**一个 Cordis 插件**里,随镜像装在
+`/opt/dsh-container-plugin`,经 `dsh --patch` 挂载进 web profile:
 
-## 验证
+- **会话 cookie 自举** —— 插件在 dsh 进程内兑换一次性登录 token,写出 cookie 供代理注入;浏览器不会接触 token。
+- **隐藏"打开配置文件"按钮** —— 上游该操作没有无桌面兜底,在容器里会 spawn `xdg-open` 扑空;插件让 `settings/describe` 报告 `hasDocument: false`,按钮按上游自身 UI 逻辑不再渲染。设置项持久化在挂载卷的 `~/.dsh` 下(上游 v0.1.7+ 按 profile 存于 `~/.dsh/profiles/<profile>/cordis.patch.yml`;旧版 `settings.yaml` 只导入一次)。
+- **传输层归属声明** —— 除非某个 shell 声明自己拥有 Host,上游浏览器代码会按 `location.hostname` 判断 `isLoopback`。插件向上游的**结构化索引注入表**推一行 `__DSH_TRANSPORT__ = { ownsHost: true }`(与上游桌面 shell、worker 预览页同款声明),设置/凭据页因此可经代理使用,且**完全不改上游构建产物**。
+- **产物后处理** —— `pnpm run build:official` 之后跑三步:≥ 100 KiB 的内联图片抽成 `/container-assets/<内容哈希>`(由插件以 `immutable` 提供,只在真正打开对应界面时才取)、客户端 bundle 用 esbuild 压缩、刷新 `.dsh-build` 构建记录使其继续与交付产物一致。
 
-每次打包都在独立的 `--network none` 容器中换路径只读挂载产物，检查哈希、链接、
-离线安装、配置解析和入口导入；要求构建依赖时还会离线重建。测试不发送模型请求。
+插件是唯一的适配维护点。上游若新增 API 使其中一部分冗余,发布流水线会自动删除对应部分(体现在该次发布的 commit 列表中,见 [docs/upstream-contract.md](docs/upstream-contract.md) § 简化触发器)。
 
-```sh
-bash tests/plugin-offline-repack.sh ghcr.io/niyueee/dsh-container:dsh-v0.2.2-rc.2
-```
+## 网络与安全
 
-参见[离线打包](docs/offline-plugins.md)、[开发](docs/development.md)、
-[部署](docs/deployment.md)和[安全](docs/security.md)。独立 TUI 客户端不再预置；
-此前安装成功不代表它与宿主的 RPC 兼容。
+- **端口模型**——`dsh web` 监听 `127.0.0.1:3080`(上游拒绝 `--host 0.0.0.0`);对外端口是 `3081`,示例默认发布在宿主回环地址。
+- **代理即安全边界**——Caddy 把 `Host`/`Origin` 改写为回环,远程浏览器因此通过 dsh 的 `/api` 信任围栏,包括原本仅限回环的设置/凭据接口。任何能访问 `3081` 的人都获得完全控制:请启用 basic auth(`DSH_PROXY_USER`/`DSH_PROXY_PASSWORD`,成对设置,否则守护脚本 dsh-web 拒绝启动)并保持端口防火墙关闭。
+- **会话自动引导**——容器适配插件在 dsh 进程内兑换一次性登录 token(启动时),代理再把会话 cookie 注入每个请求;浏览器不会接触 token。
+- **流、体积与缓存**——SSE/WebSocket 无缓冲直通(已对 Caddy 2.6 验证),dsh 的 2 秒心跳可穿过该跳。客户端 bundle 在构建期做了后处理,无头浏览器实测冷启动整页约 **1.6 MiB(线上字节)** 而非约 5.8 MiB:57 模块合并包从 5.06 MiB 降到约 1.0 MiB gzip(≥ 100 KiB 的内联图片被抽出,只在打开对应界面时才取;bundle 只压空白与语法,不改标识符)。索引 `no-store`,内容哈希的 `/assets/*` 由代理标 `immutable`,重复访问因此很便宜。
+- **遥测默认关闭** —— entrypoint 设置 `DSH_TELEMETRY_MODE=DISABLED`,OTel 反馈上报在你显式打开前不会发送任何内容。与之独立的是上游的 DeepSeek 会话日志贡献者,它**默认开启**,会把会话日志后缀附加到 DeepSeek API 请求上——发送内容与关闭方式见 [docs/security.md](docs/security.md)。
+- **附加参数**——通过容器 command 透传 `dsh web` 参数,例如 `["--port", "8080"]`(仅改内部端口;对外端口仍为 `3081`)。
+
+广域网访问请在前置代理上终结 TLS(文档含可用的 nginx 配置,含 WebSocket 头与超时设置)——详见 [docs/deployment.md](docs/deployment.md) 与 [docs/security.md](docs/security.md)。
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `DSH_PROXY_USER` / `DSH_PROXY_PASSWORD` | *(空)* | 对外代理的 basic auth(任何非回环部署都建议启用);成对设置或都不设 |
+| `DSH_TELEMETRY_MODE` | `DISABLED` | OTel 反馈上报策略;`FEEDBACK_ONLY` 恢复上游默认(显式反馈时上传),`DISABLED` 让 OTel 路径留在本地。它**不**控制 DeepSeek 会话日志贡献者([security.md](docs/security.md)) |
+| `DSH_SSH_ENABLED` | *(空)* | 启动可选的仅公钥 SSH 服务端(`1`/`true`/`yes`/`on`)。`DSH_SSH_PORT`(默认 `22`)指定容器内端口,`DSH_SSH_AUTHORIZED_KEYS` 投放公钥;没有公钥时任何人都无法登录 |
+
+其余全部使用内置默认值——dsh 数据在 `~/.dsh`,工作目录 `$HOME`,可写缓存在 `~/.cargo` / `~/.local/share`,镜像持有的工具在 `/usr/local/bin` 与 `/opt/rust`。整个 `/home/dsh` 是持久化边界:把它作为单一卷挂载;镜像升级替换工具链,从不动数据。细节见 [docs/build.md](docs/build.md) 与 [docs/deployment.md](docs/deployment.md)。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/deployment.md](docs/deployment.md) | 部署与维护:Compose、Quadlet、远程访问、离线使用、FAQ |
+| [docs/security.md](docs/security.md) | 安全说明:网络暴露取舍、凭据、可信工作负载 |
+| [docs/build.md](docs/build.md) | 构建配置:构建参数、源码版本钉定、可复现构建 |
+| [docs/releasing.md](docs/releasing.md) | 发布自动化:上游 tag 监视、契约检查、agent 修复、自动发布 |
+| [docs/upstream-contract.md](docs/upstream-contract.md) | 本镜像依赖的上游行为,以及漂移的检测方式 |
+| [docs/development.md](docs/development.md) | 目录结构与本地开发 |
 
 ## 许可证
 

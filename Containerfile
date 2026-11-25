@@ -1,0 +1,483 @@
+# syntax=docker/dockerfile:1
+#
+# DeepSeek Harness (dsh) 容器镜像
+#
+# 基础镜像: debian:12-slim(bookworm) —— 只保留本项目需要的工具链: Node.js LTS、
+# pnpm、uv、Rust/cargo、Caddy、podman、gh, 外加一组 agent 高频 CLI 工具
+# (ripgrep/fd/python3/zip/openssh-client/tmux/sqlite3/编辑器/网络诊断等),
+# 以及可选的 SSH 服务端(openssh-server: 默认不启动, 只有 DSH_SSH_ENABLED 打开时
+# 由 dsh-web 拉起, 仅公钥认证, 见下文与 docs/security.md"SSH access")。
+# bookworm 钉住的版本: podman 4.3.1 / crun 1.8.1 / caddy 2.6.2 / shellcheck 0.9.0;
+# 注意 bookworm 的 apt 没有 just(1.40 才进 trixie), 因此本镜像不再内置 just,
+# 嵌套 podman 的运行期约定也按 4.3.1 编写(见 docs/deployment.md "In-container podman")。
+# 后者全部进系统层: 卷上只放数据, agent 或用户在容器内 apt install 的东西会随
+# 容器重建丢失(可写层), 常用的就应当在构建期烘干, 避免每次重建都重新下载。
+# 在此之上按官方仓库 https://github.com/deepseek-ai/deepseek-harness 的源码
+# 方式构建 dsh: git clone 后切换到指定 tag, 再用 pnpm install/build:official。
+#
+# 可复现性: 基础镜像 tag、rust 工具链、uv 版本、dsh 源码 tag 均可通过构建参数固定;
+# pnpm 版本从所构建 tag 的 packageManager 读取并安装到系统层。Caddy/podman 来自
+# apt 仓库, dsh 依赖树由官方 pnpm-lock.yaml 锁定, 默认构建固定到 dsh-v0.2.2-rc.5。
+# 需要其他版本时显式覆盖 DSH_TAG:
+#   podman build --format docker \
+#                --build-arg DSH_TAG=dsh-v0.2.2-rc.5 \
+#                --build-arg RUST_TOOLCHAIN=1.88.0 \
+#                -t dsh-container .
+# BUILD_VERSION 写入 OCI 版本 label: CI 打 dsh-v* tag 时传官方仓库 tag,
+# 与镜像 tag 对齐; 未传时默认 latest。
+#
+# 运行时行为由 container/entrypoint.sh 控制:
+#   - dsh 数据目录使用上游默认 ~/.dsh(即 /home/dsh/.dsh), 不设 DSH_HOME;
+#     进程 cwd 直接使用 $HOME, 不预创建固定工作区子目录
+#   - dsh web 由 dsh-web 守护脚本托管, 崩溃/退出后自动重启;
+#     容器内可用 dsh-restart 手动重启 dsh web(无需重启整个容器)
+#   - dsh-web 以 `dsh --patch /opt/dsh-container-plugin/overlay.yml --profile web ...`
+#     启动 dsh(注意 web 别名会拒绝父级 --patch, 必须用 --profile web 形式),
+#     挂载容器适配插件(container/plugin/, 镜像所有, 随镜像升级):
+#     会话 cookie 自举在 dsh 进程内完成(token → cookie, 复用仍有效的旧
+#     cookie), 写出 /tmp/dsh-caddy/session-cookie 供 Caddyfile 注入;
+#     设置 > 打开配置文件按钮隐藏: 无桌面容器里上游该操作没有 headless
+#     兜底(会 spawn xdg-open 扑空), 插件把 settings provider 实例的
+#     documentPath 置为 undefined, describe 即返回 hasDocument:false,
+#     按钮按上游自身逻辑不渲染(不引入浏览器侧代码, 也不提供下载端点);
+#     浏览器端 isLoopback 门(location.hostname 限制设置/凭据页)由插件向上游的
+#     结构化索引注入表推一行 __DSH_TRANSPORT__={ownsHost:true} 解决 —— 这是上游给
+#     "自己拥有 Host 的 shell"预留的声明(桌面 shell 与 worker 预览页同款), 唯一消费点
+#     就是 connection 的 isLoopback, 因此不再需要改写上游构建产物;
+#     构建期后处理三件套(都在 plugin/scripts/, 顺序固定):
+#       1. extract-inline-assets.js 把 >=100 KiB 的内联 data URL 图片抽成真实
+#          文件(8 张引导插画占合并包 49%, 且每个用户只用得到 1 张), 由插件的
+#          /container-assets 路由按内容哈希 + immutable 提供;
+#       2. minify-client.mjs 用 esbuild(--minify-whitespace --minify-syntax) 逐包压缩
+#          客户端产物(上游不压缩), 冷启动 JS 体积与解析量大幅下降。**必须保留标识符**:
+#          同一 combo 里多个产物共享一个脚本作用域, 改名后模块 body 会调到别的文件
+#          的同名 helper, 客户端直接起不来(无头浏览器实测 58/65 插件激活失败);
+#       3. refresh-build-record.mjs 用上游自己的 writeClientBuildRecord() 重算
+#          .dsh-build 摘要(前两步改了字节, 否则 readClientBuildRecord 会失败)。
+#     三步都 fail-fast。不再注入 randomUUID polyfill: 上游自带
+#     不依赖 secure context 的 randomUuid()(util-crypto)
+#   - 第三方插件按架构离线打包为 Release 附件，不进入镜像。
+#   - 可选 SSH 服务端(opt-in): 第 1 步装 openssh-server, DSH_SSH_ENABLED 为真时
+#     dsh-web 用 root 启动 /usr/sbin/sshd -f /etc/ssh/sshd_config.dsh(独立完整
+#     配置, 不读发行版 sshd_config), 仅公钥认证、禁 root 登录、禁密码与 PAM;
+#     主机密钥在数据卷 $HOME/.ssh/host(root 属主 0600, 容器重建不轮换),
+#     授权公钥走卷上的 ~/.ssh/authorized_keys。登录即得到一个可免密 sudo 的
+#     shell(等价 root), 端口未发布时不可达, 见 docs/security.md "SSH access"
+#   - 分层(hermes-agent 模式): 工具链全部是镜像所有的系统层真二进制 —— uv/pnpm
+#     与 rustup 代理在 /usr/local/bin、rust 工具链树在 /opt/rust、dsh 在
+#     /opt/deepseek-harness、yq 的独立 venv 在 /opt/uv-tools, 随镜像更新整体
+#     重置; /home/dsh 整体挂载为数据卷,
+#     但卷上只有数据: ~/.dsh、可写缓存(~/.cargo 的 registry/cache、uv 的
+#     ~/.local/share/uv、pnpm store)与用户自装工具(~/.local/bin、~/.cargo/bin、
+#     pnpm 全局 bin, PATH 垫底)。旧镜像种进卷的工具副本被 PATH 遮蔽(惰性),
+#     手动清理见 release notes
+#   - agent 高频 CLI 工具(ripgrep、fd、python3、zip、openssh-client、tmux、
+#     sqlite3、vim/nano、less、rsync、wget、tree、htop、tzdata、patch,
+#     以及运维面更依赖的网络/进程诊断: dig、nc、socat、traceroute、iperf3、
+#     file、ncdu、strace、zstd/lz4 等)与 crun 同样进系统层: 容器内 sudo apt
+#     install 落在可写层, 重建即丢, 常用工具必须构建期烘干
+#     (见 docs/deployment.md "内置工具" 一节)
+#   - 容器内 rootless podman 的运行期环境: /etc/subuid、/etc/subgid 各自只有
+#     一行 dsh 区间(重复行使 newuidmap 写出重叠映射, 内核 EINVAL),
+#     entrypoint provision XDG_RUNTIME_DIR(/run/user/$UID, 无 login session
+#     时缺失会导致 rootless podman 直接失败), /etc/bash.bashrc 给 docker exec
+#     的交互 shell 兜底导出; /etc/containers/containers.conf 预设 rootless
+#     网络后端为 slirp4netns 并清空 default_sysctls(嵌套场景写 /proc/sys
+#     必败)。绝不导出 _CONTAINERS_USERNS_CONFIGURED: 它让内层 podman 跳过
+#     userns 创建, 而 bookworm 的 podman 4.3.1 rootless 路径仍需要它(在 5.x 上
+#     表现为 store/network 不初始化的 nil panic); 该变量早年是为绕开 newuidmap
+#     失败而加, 而真正的失败原因是上面的 subuid 重复行。
+#     详见 docs/deployment.md "In-container podman"
+#   - 随后以 `dsh web` 启动 Web UI, 监听 127.0.0.1:3080
+#     (上游 tag 与 main 均拒绝 --host 0.0.0.0: 上游有意为之的安全设计)
+#   - 遥测默认关闭: entrypoint 导出 DSH_TELEMETRY_MODE=DISABLED(可覆盖),
+#     dsh 的 OTel 反馈上传(上游默认 FEEDBACK_ONLY)不把会话数据发往
+#     harness-telemetry.deepseeksvc.com
+#   - Caddy 反向代理监听 0.0.0.0:3081, 把 Host/Origin 改写为回环后转发到 dsh 的
+#     127.0.0.1:3080(UI 资源压缩由 dsh 自带 webserver 的 gzip 承担); 并补两条
+#     缓存策略: / 与 /index.html 两个索引入口 no-store(动态启动清单),
+#     内容哈希的 /assets/* immutable(dsh 自己不发缓存头, 否则每次导航重下
+#     约 475 KiB);
+#     运行期崩溃自动重启。
+#     dsh 的 /api 信任围栏只检查 HTTP 头, 因此远程浏览器经代理
+#     也能通过全部接口(含设置/凭据等原本仅回环的方法); 安全边界随之转移到代理。
+#     DSH_PROXY_USER + DSH_PROXY_PASSWORD 必须成对设置以启用 basic auth,
+#     只设置一个会直接拒绝启动, 见 docs/security.md
+
+# ---- 构建参数(全部有默认值) ----------------------------------------------
+# BASE_IMAGE 声明在 FROM 之前(全局作用域), 供 FROM 行使用; 其余 ARG 在 FROM
+# 之后重新声明才对本阶段可见。
+ARG BASE_IMAGE=debian:12-slim
+
+FROM ${BASE_IMAGE}
+
+ARG DSH_TAG=dsh-v0.2.2-rc.5
+ARG BUILD_VERSION=latest
+ARG RUST_TOOLCHAIN=stable
+ARG UV_VERSION=latest
+ARG BUILD_GIT_SHA=unknown
+ARG BUILD_GIT_REF=unknown
+ARG USERNAME=dsh
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+LABEL org.opencontainers.image.title="DeepSeek Harness (dsh) container image" \
+      org.opencontainers.image.description="Debian slim based image for the DeepSeek Harness Web UI, built from source at a pinned upstream tag" \
+      org.opencontainers.image.source="https://github.com/niyueee/dsh-container" \
+      org.opencontainers.image.version="${BUILD_VERSION}" \
+      org.opencontainers.image.revision="${BUILD_GIT_SHA}" \
+      org.opencontainers.image.ref.name="${BUILD_GIT_REF}"
+
+# 基础环境变量
+# 工具链归镜像(系统层), 卷只放可写缓存/数据/自装工具:
+# RUSTUP_HOME(/opt/rust/rustup)指向工具链树, 运行期需要写入 —— rustup 的
+# settings/tmp/downloads/toolchains 都要写; 构建时属主已设为 dsh,
+# entrypoint 启动时兜底自愈(见 container/entrypoint.sh)。
+# CARGO_HOME/PNPM_HOME 留在用户卷。
+# PATH 镜像优先, 用户目录(含 PNPM_HOME 的自装全局包)垫底。
+ENV DEBIAN_FRONTEND=noninteractive \
+    SHELL=/bin/bash \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    RUSTUP_HOME=/opt/rust/rustup \
+    CARGO_HOME=/home/dsh/.cargo \
+    PNPM_HOME=/home/dsh/.local/share/pnpm \
+    NPM_CONFIG_PREFIX=/home/dsh/.local
+# PATH 镜像优先: 系统层真二进制在前, 用户自装工具(~/.local/bin、~/.cargo/bin、
+# pnpm 全局 bin)垫底。PNPM_HOME 自身只是 pnpm 的 store 与 home, 可执行文件落在
+# 它的 bin/ 子目录 —— 只写 $PNPM_HOME 会让 `pnpm add -g` 装出来的命令不在 PATH
+# 里(pnpm 自己就报 "The configured global bin directory ... is not in PATH",
+# 见 container/entrypoint.sh 与 dsh-web.sh 中同一条链路的同步)。
+ENV PATH=/usr/local/sbin:/usr/local/bin:/home/dsh/.local/bin:/home/dsh/.cargo/bin:${PNPM_HOME}/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# ---------------------------------------------------------------------------
+# 1. 安装基础工具链、C/C++ 编译依赖、Caddy、嵌套 Podman 及 GitHub CLI 源。
+#    后半段是 agent 高频 CLI 工具(ripgrep/fd/python3/zip/ssh/tmux/sqlite3/
+#    编辑器/rsync/wget/tree/htop/tzdata/patch/git-lfs)与 podman 的 crun
+#    运行时 —— 全部烘干进系统层, 容器内运行期再 apt install 只会落在可写层、
+#    容器重建即丢(见 docs/deployment.md "内置工具")。
+#    本镜像的运维面高度集中在网络栈(Caddy → dsh, 以及容器内嵌套 podman 的
+#    slirp4netns 网络): 因此另外烘干一组诊断工具 —— dig/nc/socat/traceroute/
+#    iperf3(连通性与带宽)、file/ncdu(对象与空间)、strace(三进程互相拉扯时
+#    追踪 dsh-web/Caddy/dsh)、zstd/lz4/bc/moreutils/pv/uuid-runtime(数据处理)。
+#    刻意**不**装 tcpdump/iftop/mtr: 容器 CapEff 无 CAP_NET_RAW(实测
+#    0x201000=cap_net_admin,cap_sys_admin), 抓包套接字打不开, 装了也只会让
+#    使用者以为能用。shellcheck 是开发工具(bookworm 起不再有 just 包, 见上);
+#    另有 openssh-server(只有显式开启 DSH_SSH_ENABLED 才会启动)。
+#    第三方插件作为独立 Release 附件交付。
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
+    git \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    sudo \
+    jq \
+    unzip \
+    procps \
+    caddy \
+    podman \
+    crun \
+    fuse-overlayfs \
+    uidmap \
+    slirp4netns \
+    iptables \
+    ripgrep \
+    fd-find \
+    patch \
+    python3 \
+    python3-venv \
+    python3-pip \
+    python3-dev \
+    zip \
+    less \
+    vim-tiny \
+    nano \
+    openssh-client \
+    openssh-server \
+    rsync \
+    wget \
+    iputils-ping \
+    iproute2 \
+    lsof \
+    tree \
+    htop \
+    sqlite3 \
+    tmux \
+    tzdata \
+    git-lfs \
+    file \
+    bind9-dnsutils \
+    netcat-openbsd \
+    socat \
+    traceroute \
+    iperf3 \
+    strace \
+    ncdu \
+    zstd \
+    lz4 \
+    bc \
+    moreutils \
+    pv \
+    uuid-runtime \
+    shellcheck \
+    && mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+         -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+         > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/* \
+    && git lfs install --system \
+    # Debian 的 fd-find 二进制叫 fdfind(与既有 fd 包冲突改名), 在系统层补一个
+    # fd 真名 —— 镜像所有, agent/脚本按上游名字直接调用即可。
+    && FD_BIN="$(command -v fdfind || command -v fd-find || true)" \
+    && if [ -z "$FD_BIN" ]; then echo "fd binary (fdfind) missing after fd-find install" >&2; exit 1; fi \
+    && ln -sfn "$FD_BIN" /usr/local/bin/fd \
+    && fd --version \
+    # openssh-server 的 postinst 可能已在镜像层生成主机密钥 —— 那会让所有容器共用
+    # 同一份密钥(等于人人皆知), 因此构建期删掉: 主机密钥在首次启动时生成到数据卷
+    # (root 0600, 容器重建不轮换), sshd 的配置只引用卷内路径(container/sshd_config)。
+    && rm -f /etc/ssh/ssh_host_* \
+    # 特权分离用户由包创建, 运行时以 root 启动 sshd 需要它; 缺失直接构建失败。
+    && getent passwd sshd >/dev/null \
+    && ssh -V
+
+# ---------------------------------------------------------------------------
+# 2. 创建 dsh 用户、免密 sudo 组、rootless Podman 映射;
+#    /etc/bash.bashrc 追加 XDG_RUNTIME_DIR 兜底导出 —— docker exec 的交互
+#    shell 不经过 entrypoint(那里已为 pid1 进程树 provision /run/user/$UID),
+#    交互式 bash 自动导出同样默认值, 保证 podman 在 exec 会话里同样可用。
+#    subuid/subgid 必须幂等: Debian 的 useradd 建用户时会自动分配从属 ID 区间,
+#    再无条件 echo 一行会得到重复项 —— newuidmap 据此构造出重叠映射, 内核以
+#    Invalid argument 拒绝写入 uid_map, rootless podman 连用户命名空间都建不了。
+#    无 PAM 的 sshd 拒绝锁定账户；不可匹配的 * 密码保留无密码登录的限制，允许公钥认证。
+# ---------------------------------------------------------------------------
+RUN groupadd --gid $USER_GID $USERNAME \
+    && useradd --uid $USER_UID --gid $USER_GID -m -s /bin/bash $USERNAME \
+    && usermod -p '*' -aG sudo $USERNAME \
+    && echo '%sudo ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME \
+    && grep -q "^$USERNAME:100000:65536$" /etc/subuid || echo "$USERNAME:100000:65536" >> /etc/subuid \
+    && grep -q "^$USERNAME:100000:65536$" /etc/subgid || echo "$USERNAME:100000:65536" >> /etc/subgid \
+    && mkdir -p /home/dsh/.dsh /home/dsh/.cargo /home/dsh/.local/bin /home/dsh/.local/share/pnpm \
+    && chown -R $USER_UID:$USER_GID /home/dsh/.dsh /home/dsh/.cargo /home/dsh/.local \
+    && cat >> /etc/bash.bashrc <<'EOF'
+
+# dsh-container: rootless podman 的 XDG_RUNTIME_DIR 兜底。容器无 login session,
+# 该变量默认不设置, 而 rootless podman 运行期必须能写它(libpod 运行时状态)。
+# pid1 进程树由 entrypoint provision /run/user/$UID; exec 的交互 shell 在这里
+# 补同样的默认值(目录已存在才导出)。
+if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+EOF
+
+# ---------------------------------------------------------------------------
+# 3. 配置嵌套 Podman
+#    storage.conf: 只设 mount_program、不钉死 driver —— podman 自动探测到
+#    overlay 时挂载程序同样生效(rootless 在无 userns overlay 支持的内核上走
+#    fuse-overlayfs); 而 "driver=overlay + mount_program 但不给
+#    runroot/graphroot" 会让 rootful podman 加载配置即失败
+#    ("runroot must be set"), rootless 侧反而正常。
+#    containers.conf: 默认 rootless 网络后端固定为 slirp4netns(镜像不装
+#    pasta, 而较新的 podman 首选 pasta, 缺失即报错); default_sysctls 清空 ——
+#    Debian 默认的 net.ipv4.ping_group_range 写入在嵌套 rootless 容器里必然
+#    失败(内层 /proc/sys 只读, crun 写 sysctl 失败即容器创建失败)。
+# ---------------------------------------------------------------------------
+RUN mkdir -p /etc/containers \
+    && printf '[storage.options]\nmount_program = "/usr/bin/fuse-overlayfs"\n' \
+         > /etc/containers/storage.conf \
+    && printf '[containers]\ndefault_sysctls = []\n\n[network]\ndefault_rootless_network_cmd = "slirp4netns"\n' \
+         > /etc/containers/containers.conf \
+    && echo '{"default": [{"type": "insecureAcceptAnything"}]}' > /etc/containers/policy.json
+
+# ---------------------------------------------------------------------------
+# 4. 安装 Node.js 22.x LTS(系统层)
+# ---------------------------------------------------------------------------
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/node-setup.sh \
+    && bash /tmp/node-setup.sh \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* /tmp/node-setup.sh
+
+# ---------------------------------------------------------------------------
+# 5. 安装 uv(系统层真二进制: 直接落 /usr/local/bin, 随镜像升级; 官方独立
+#    安装脚本, 与 rustup 同模式)。UV_UNMANAGED_INSTALL 让脚本只落二进制、
+#    不改 PATH/env 文件; astral.sh/uv/latest/install.sh 不存在(404),
+#    latest 用默认 URL
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    export UV_UNMANAGED_INSTALL=/usr/local/bin; \
+    if [ "${UV_VERSION}" = "latest" ]; then \
+      UV_URL="https://astral.sh/uv/install.sh"; \
+    else \
+      UV_URL="https://astral.sh/uv/${UV_VERSION}/install.sh"; \
+    fi; \
+    # astral.sh 的安装 URL 会 302 跳转, 必须带 -L 跟随, 否则存下的是 HTML 跳转页
+    curl -sSfL --proto '=https' --tlsv1.2 "$UV_URL" -o /tmp/uv-install.sh; \
+    sh /tmp/uv-install.sh; \
+    rm -f /tmp/uv-install.sh; \
+    uv --version
+
+# ---------------------------------------------------------------------------
+# 6. 安装 Rust/cargo(系统层: 工具链树在 /opt/rust, rustup 代理 symlink 到
+#    /usr/local/bin, 随镜像升级)。运行期 RUSTUP_HOME 指回 /opt/rust/rustup,
+#    CARGO_HOME 重定向到用户卷(~/.cargo)承接 registry/cache 与
+#    cargo install 自装工具 —— 工具链归镜像, 缓存/自装归用户。
+#    rustup 运行期要写 RUSTUP_HOME(settings/tmp/downloads/toolchains), 因此
+#    这里把属主交给 dsh: 容器重建后不会因镜像层的 root 属主而拒绝写入
+#    (entrypoint 启动时还会兜底自愈)。
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    export RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo; \
+    mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"; \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh; \
+    sh /tmp/rustup-init.sh -y --profile minimal --no-modify-path --default-toolchain "${RUST_TOOLCHAIN}"; \
+    # minimal profile 只带 rustc/std/cargo; 编程 agent 高频使用的
+    # rustfmt/clippy 在构建期补齐 —— 否则运行期 rustup component add 会写
+    # /opt/rust(系统层), 容器重建即丢。此时 rustup 代理只在 $CARGO_HOME/bin
+    # (尚未 symlink 到 /usr/local/bin, 也不在本层 PATH 里), 必须显式路径调用
+    "$CARGO_HOME/bin/rustup" component add rustfmt clippy; \
+    for b in "$CARGO_HOME/bin/"*; do ln -sfn "$b" /usr/local/bin/; done; \
+    rm -f /tmp/rustup-init.sh; \
+    chown -R $USER_UID:$USER_GID "$RUSTUP_HOME"; \
+    rustc --version; \
+    cargo --version; \
+    rustup --version
+
+# ---------------------------------------------------------------------------
+# 7. 入口、dsh web 守护/重启、插件登记脚本、可选 sshd 配置与容器适配插件
+#    (适配插件 = 全部进程内适配逻辑的唯一维护点, 见 container/plugin/)
+# ---------------------------------------------------------------------------
+COPY container/dsh.sh /usr/local/bin/dsh
+COPY container/entrypoint.sh /usr/local/bin/entrypoint
+COPY container/dsh-web.sh /usr/local/bin/dsh-web
+COPY container/dsh-restart.sh /usr/local/bin/dsh-restart
+COPY container/healthcheck.sh /usr/local/bin/healthcheck
+COPY container/sshd_config /etc/ssh/sshd_config.dsh
+COPY container/plugin /opt/dsh-container-plugin
+RUN chmod 755 /usr/local/bin/dsh /usr/local/bin/entrypoint /usr/local/bin/dsh-web /usr/local/bin/dsh-restart /usr/local/bin/healthcheck \
+    && chmod 644 /etc/ssh/sshd_config.dsh
+
+# ---------------------------------------------------------------------------
+# 8. 拉取 dsh 官方源码并切换到指定 tag(默认固定；显式传 latest 才追踪最新 tag)
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    git clone --filter=blob:none --no-checkout https://github.com/deepseek-ai/deepseek-harness.git /opt/deepseek-harness; \
+    cd /opt/deepseek-harness; \
+    if [ "${DSH_TAG}" = "latest" ]; then \
+      DSH_TAG="$(git tag --sort=-v:refname --list 'dsh-v*' | head -n1)"; \
+      echo "resolved latest upstream dsh tag: $DSH_TAG"; \
+    fi; \
+    test -n "$DSH_TAG"; \
+    git checkout "$DSH_TAG"; \
+    git rev-parse HEAD
+
+# ---------------------------------------------------------------------------
+# 9. 安装 pnpm(系统层真二进制: npm 默认 prefix /usr/local, 随镜像升级;
+#    版本仍从所构建 tag 的 packageManager 读取, 与 dsh 锁文件的契约一致)。
+#    显式 --prefix 压过 ENV 里的 NPM_CONFIG_PREFIX(那是给运行期用户的)。
+#    PNPM_HOME 留在用户卷, 只承接 pnpm store 与用户自装全局包
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    PNPM_VERSION="$(node -p "require('/opt/deepseek-harness/package.json').packageManager.split('@')[1]")"; \
+    npm install --global --prefix /usr/local --no-fund --no-audit "pnpm@$PNPM_VERSION"; \
+    pnpm --version
+
+# ---------------------------------------------------------------------------
+# 11. 安装 yq(经 uv, 系统层: 与 uv/pnpm/cargo 同属"镜像持有的工具")
+#     Debian 12(bookworm)的 apt 只提供 Python 版 yq(kislyuk 的 python-yq,
+#     与 Go 版 yq 语法不同), 因此走
+#     uv tool: 落成 /opt/uv-tools/yq 下的独立 venv + /usr/local/bin/{yq,tomlq,xq}
+#     软链。这个 venv 的解释器指向系统 /usr/bin(PyYAML 与 stdlib 自带依赖),
+#     不依赖 ~/.local/share/uv 里 uv 托管的 Python, 因此运行期不碰用户卷。
+#     注意它是 kislyuk 的 Python yq(4.x): **调用 /usr/bin/jq 完成 JSON 处理**,
+#     所以 jq 是运行期硬依赖(镜像已装, 见第 1 步), `yq --version` 也会顺带
+#     打印 jq 的版本行。
+#     UV_TOOL_DIR 只在本构建步骤内设置, **不**进全局 ENV —— 否则运行期用户
+#     自己 `uv tool install` 会去写 /opt 而撞权限。用户自装走默认
+#     ~/.local/share/uv/tools(在卷上, 持久), 见 docs/deployment.md。
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    export UV_TOOL_DIR=/opt/uv-tools \
+           UV_TOOL_BIN_DIR=/usr/local/bin \
+           UV_LINK_MODE=copy; \
+    mkdir -p "$UV_TOOL_DIR"; \
+    uv tool install yq; \
+    test -x /usr/local/bin/yq; \
+    yq --version
+
+# ---------------------------------------------------------------------------
+# 12. 从源码构建 dsh(系统层 /opt/deepseek-harness; 构建产物与镜像绑定)
+#     产物后处理顺序固定: 抽图 -> minify -> 重写构建记录(详见文件头说明)。
+#     esbuild 是构建期专用工具: 装进一次性前缀, 用完在同一层删除, 不进最终镜像。
+# ---------------------------------------------------------------------------
+RUN --mount=type=cache,target=/root/.pnpm-store,id=pnpm-store \
+    set -eux; \
+    export CI=true; \
+    cd /opt/deepseek-harness; \
+    pnpm install --frozen-lockfile --store-dir /root/.pnpm-store; \
+    pnpm run build:official; \
+    npm install --global --prefix /tmp/dsh-build-tools --no-fund --no-audit esbuild@0.25.12; \
+    node /opt/dsh-container-plugin/scripts/extract-inline-assets.js --root /opt/deepseek-harness; \
+    node /opt/dsh-container-plugin/scripts/minify-client.mjs --root /opt/deepseek-harness --esbuild /tmp/dsh-build-tools/bin/esbuild; \
+    node --disable-warning=ExperimentalWarning --experimental-strip-types \
+      /opt/dsh-container-plugin/scripts/refresh-build-record.mjs /opt/deepseek-harness; \
+    rm -rf /tmp/dsh-build-tools; \
+    chown -R dsh:dsh /opt/deepseek-harness; \
+    mkdir -p /etc/dsh-container; \
+    # -c 紧凑输出: 冒烟测试按 '"image":"ghcr.io/niyueee/dsh-container"' 精确 grep
+    jq -cn --arg version "${BUILD_VERSION}" --arg dsh_tag "${DSH_TAG}" \
+          --arg revision "${BUILD_GIT_SHA}" \
+          --arg node "$(node --version)" --arg pnpm "$(pnpm --version)" \
+          --arg rust "$(rustc --version | awk '{print $2}')" \
+          --arg uv "$(uv --version | awk '{print $2}')" \
+      '{schema:1,image:"ghcr.io/niyueee/dsh-container",version:$version,dsh_tag:$dsh_tag,revision:$revision,tools:{node:$node,pnpm:$pnpm,rust:$rust,uv:$uv}}' \
+      > /etc/dsh-container/provenance.json; \
+    chmod 0444 /etc/dsh-container/provenance.json; \
+    cat /etc/dsh-container/provenance.json; \
+    dsh --version
+
+# ---------------------------------------------------------------------------
+# 13. 预热 apt 包索引: 最终镜像保留一份最新 /var/lib/apt/lists, 容器内开箱
+#     即可 apt install, 无需先手动 apt-get update。前面各步骤用完即清是为了
+#     压缩中间层; 这里的索引属于系统层, 随镜像升级重置(索引会随镜像变旧,
+#     过期时容器内先 sudo apt-get update 再装, 见 docs/build.md)
+# ---------------------------------------------------------------------------
+RUN apt-get update
+
+# ---------------------------------------------------------------------------
+# 14. 运行配置
+# ---------------------------------------------------------------------------
+WORKDIR /home/dsh
+# 3081 是 Caddy 反代(唯一的默认对外入口); 22 只在显式开启 DSH_SSH_ENABLED
+# 时才会监听(见 container/sshd_config), 这里一并声明便于使用者阅读 ——
+# EXPOSE 本身只是文档, 真正的可达性取决于编排层是否发布端口。
+EXPOSE 3081 22
+
+# 容器内 podman(rootless): 走标准 rootless 流程(unshare + setuid newuidmap,
+# 前提是 subuid/subgid 各自只有一行 dsh 区间, 见上文步骤 2), 因此绝不能
+# 导出 _CONTAINERS_USERNS_CONFIGURED —— 它让内层 podman 跳过 userns 创建, 而
+# makeRuntime 仍按 euid!=0 走 needsUserns 分支: store 与 network 后端从不初始化,
+# 之后每条命令都是 nil 解引用 panic(该变量早年为绕开 newuidmap 失败而加, 而
+# 失败的真正原因是 subuid 重复行)。bookworm 的 podman 是 4.3.1, 但这条约定与
+# 版本无关: rootless 侧必须自己建 userns。
+# XDG_RUNTIME_DIR 由 entrypoint provision /run/user/$UID(以及 /etc/bash.bashrc
+# 给 exec shell 兜底), 不进 ENV 是因为它依赖运行期 uid。宿主侧还需的
+# /dev/fuse、/dev/net/tun、unmask /proc 等条件见 docs/deployment.md
+# "In-container podman"。
+
+# Caddy 把 0.0.0.0:3081 改写头后转发到 dsh 的 127.0.0.1:$DSH_WEB_PORT;
+# healthcheck 同时要求 dsh 和代理可响应。dsh web 对无会话的根请求返回 401,
+# 因此存活判据是 curl 退出码(连接成功)而不是 HTTP 200。内部端口由脚本从
+# pid1 环境的 DSH_WEB_PORT 读取(entrypoint 解析 --port 后写入), 兜底 3080。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD /usr/local/bin/healthcheck
+
+USER dsh
+ENTRYPOINT ["entrypoint"]

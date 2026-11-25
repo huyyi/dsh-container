@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "plugins": [
+    "dsh-genui@0.3.4",
+    "dsh-context@0.87.1",
+    "dsh-better-sidebar@0.32.1",
+    "@michengai/dsh-skills-manager@1.5.3",
+    "dsh-mnemon@0.5.53",
+    "dsh-browser-cdp@1.14.10",
+    "dsh-office-kit@0.4.8"
+  ]
+}

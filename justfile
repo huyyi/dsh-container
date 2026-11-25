@@ -1,11 +1,49 @@
-# 插件打包和验证；不构建宿主镜像。
-image := "ghcr.io/niyueee/dsh-container:dsh-v0.2.2-rc.2"
+# dsh 容器镜像常用命令(需 podman 或 docker)
 
-pack host=image:
-    bash plugin/offline_repack.sh --image {{host}}
+container := `command -v podman >/dev/null 2>&1 && echo podman || echo docker`
+build_format := if container == "podman" { "--format docker" } else { "" }
 
-test host=image:
-    bash tests/plugin-offline-repack.sh {{host}}
+# 本地构建镜像(不推送)。podman 必须用 --format docker 保留 HEALTHCHECK
+# (podman 默认 OCI 格式会丢弃 HEALTHCHECK); docker 不支持该 flag, 因此条件传入。
+build:
+    {{container}} build {{build_format}} -t ghcr.io/niyueee/dsh-container:local .
 
+# 前台调试运行(回环端口映射, 与 examples 一致 —— 局域网暴露是显式
+# 的 -p 3081:3081 改绑动作; --rm 退出后用户层改动随容器丢弃)
+debug:
+    {{container}} run --rm -p 127.0.0.1:3081:3081 \
+        ghcr.io/niyueee/dsh-container:local
+
+# 在不重启容器的情况下重启容器内的 dsh web(dsh-web 守护会自动重新拉起)
+restart-dsh:
+    {{container}} exec dsh dsh-restart
+
+# 对已构建镜像跑冒烟测试(先 just build; DOCKER 已按 podman/docker 自动选择)
+test image="ghcr.io/niyueee/dsh-container:local":
+    DOCKER={{container}} tests/smoke.sh {{image}}
+
+# 对上游 tag 跑契约静态检查(浅克隆上游, 数秒判定兼容漂移;
+# 本地已有 checkout 时直接调 tests/contract.sh --tag X --dir PATH 更快)
+contract tag:
+    tests/contract.sh --tag {{tag}}
+
+# 本地静态门禁: 与 CI 的 "Shell syntax and lint check" / "Doc links resolve" /
+# "README parity" 三步同一套判据, 不必推 CI 才知道坏了。不需要容器。
+# shellcheck 缺失时明确失败(不静默跳过): CI runner 自带, 本地按发行版安装
+# (Debian/Ubuntu: apt install shellcheck; macOS: brew install shellcheck)。
 lint:
-    bash tests/lint.sh
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v shellcheck >/dev/null 2>&1; then
+        echo "lint: shellcheck 未安装 —— Debian/Ubuntu: sudo apt install shellcheck; macOS: brew install shellcheck" >&2
+        exit 1
+    fi
+    bash -n container/*.sh tests/*.sh scripts/*.sh
+    shellcheck container/*.sh tests/*.sh scripts/*.sh
+    python3 tests/validate-docs.py
+    node --check scripts/registry-tarballs.mjs
+    python3 tests/registry-plugins.py
+
+# 在目标镜像中生成离线插件包并验证断网安装
+package-plugins image tag output:
+    scripts/package-plugins.sh {{image}} {{tag}} {{output}}

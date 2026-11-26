@@ -354,6 +354,11 @@ RUN set -eux; \
 # 7. 入口、dsh web 守护/重启、插件登记脚本、可选 sshd 配置与容器适配插件
 #    (适配插件 = 全部进程内适配逻辑的唯一维护点, 见 container/plugin/)
 # ---------------------------------------------------------------------------
+# 内网源只在启动时写配置，不联网更新或清理预热的 apt 索引。
+COPY container/configure-mirrors.py /usr/local/lib/dsh-container/configure-mirrors.py
+RUN mkdir -p /etc/dsh-container/apt-defaults \
+    && cp -a /etc/apt/sources.list.d/. /etc/dsh-container/apt-defaults/ \
+    && if [ -f /etc/apt/sources.list ]; then cp /etc/apt/sources.list /etc/dsh-container/apt-defaults/sources.list; fi
 COPY container/dsh.sh /usr/local/bin/dsh
 COPY container/entrypoint.sh /usr/local/bin/entrypoint
 COPY container/dsh-web.sh /usr/local/bin/dsh-web

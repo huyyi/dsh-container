@@ -120,6 +120,8 @@ WebSocket headers and raised timeouts) — see [docs/deployment.md](docs/deploym
 | `DSH_PROXY_USER` / `DSH_PROXY_PASSWORD` | *(empty)* | Basic auth on the exposed proxy (recommended for any non-loopback deployment); set both or neither |
 | `DSH_TELEMETRY_MODE` | `DISABLED` | OTel feedback-upload policy; `FEEDBACK_ONLY` restores the upstream default (uploads on explicit feedback), `DISABLED` keeps the OTel path local. It does **not** control the DeepSeek session-log contributor ([security.md](docs/security.md)) |
 | `DSH_SSH_ENABLED` | *(unset)* | Start the optional key-only SSH daemon (`1`/`true`/`yes`/`on`). `DSH_SSH_PORT` (default `22`) picks the in-container port, `DSH_SSH_AUTHORIZED_KEYS` injects public keys; without a key nobody can log in |
+| `DSH_APT_MIRROR` | *(unset)* | Debian repository URL for all image Debian suites; disables image NodeSource/GitHub CLI sources; configuration only, no index update or cleanup |
+| `DSH_PYPI_MIRROR` | *(unset)* | PyPI simple-index URL for system pip/uv configuration; higher-priority tool settings still apply |
 
 Everything else uses built-in defaults — dsh data at `~/.dsh`, cwd `$HOME`, writable caches under
 `~/.cargo` / `~/.local/share`, image-owned tools in `/usr/local/bin` and `/opt/rust`. The whole

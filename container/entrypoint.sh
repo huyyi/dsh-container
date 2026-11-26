@@ -18,7 +18,8 @@
 #      nil panic(bookworm 的 podman 4.3.1 rootless 路径同样需要自建 userns)。
 #      宿主侧还需的 /dev/fuse、/dev/net/tun、unmask /proc 条件见
 #      docs/deployment.md "In-container podman"。
-#   5. exec dsh-web —— dsh web 的启动/监督、会话 cookie 的就绪等待与 Caddy
+#   5. DSH_APT_MIRROR / DSH_PYPI_MIRROR 只写系统源配置，不 update、不清索引。
+#   6. exec dsh-web —— dsh web 的启动/监督、会话 cookie 的就绪等待与 Caddy
 #      反代全部由 dsh-web 托管(会话 cookie 自举由容器适配插件在 dsh 进程内
 #      完成, 见 container/plugin/ 与 container/dsh-web.sh); 可选的 sshd
 #      (DSH_SSH_ENABLED, 配置见 container/sshd_config)也由 dsh-web 监督。
@@ -42,6 +43,10 @@ if [ -z "$HOME" ]; then
   exit 1
 fi
 export HOME
+
+# 系统配置同时用于 exec 和 sudo；环境变量未设置时保持默认或恢复此前接管的配置。
+sudo -n --preserve-env=DSH_APT_MIRROR,DSH_PYPI_MIRROR \
+  /usr/bin/python3 /usr/local/lib/dsh-container/configure-mirrors.py
 
 # 分层: 工具链归镜像(系统层), 卷只放数据/缓存/自装工具:
 # - dsh 数据不设置 DSH_HOME, 使用上游默认 ~/.dsh

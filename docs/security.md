@@ -212,3 +212,8 @@ Third-party plugins are distributed as separate offline Release archives and are
 automatically installed at container startup. The batch installer verifies archive contents,
 architecture and the exact dsh version. Installed plugins run with the agent's permissions;
 archive checksums detect transfer corruption and do not establish publisher trust.
+
+Internal package mirror settings preserve apt signature checks and HTTPS certificate verification.
+An explicitly configured HTTP PyPI mirror adds that host to pip's trusted-host setting. Source
+configuration never updates or clears apt indexes. URLs are not printed by the configuration helper;
+URLs containing credentials remain sensitive in container environment/configuration files.

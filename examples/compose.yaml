@@ -47,6 +47,9 @@ services:
     #   DSH_SSH_ENABLED: "1"
     #   DSH_SSH_AUTHORIZED_KEYS: "ssh-ed25519 AAAA… you@example"
     #   DSH_SSH_PORT: "22"
+    # 内网源仅改配置，不更新或清理 apt 索引；仓库须支持全部 Debian suite。
+    #   DSH_APT_MIRROR: "https://apt.internal.example/repository/debian"
+    #   DSH_PYPI_MIRROR: "https://pypi.internal.example/simple"
     volumes:
       - dsh-home:/home/dsh
       # Host-visible alternative (owner must be uid 1000; keep :Z on SELinux):

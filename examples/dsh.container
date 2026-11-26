@@ -33,6 +33,9 @@ PublishPort=127.0.0.1:3081:3081
 # PublishPort=3081:3081 (plain LAN) or exposing the host proxy publicly.
 # Environment=DSH_PROXY_USER=admin
 # Environment=DSH_PROXY_PASSWORD=replace-with-a-strong-password
+# 内网源只修改配置，不更新或清理 apt 索引。
+# Environment=DSH_APT_MIRROR=https://apt.internal.example/repository/debian
+# Environment=DSH_PYPI_MIRROR=https://pypi.internal.example/simple
 # Optional: change dsh's internal port (the exposed port stays 3081).
 # Exec=--port 8080
 # Optional: in-container (rootless) podman. The image prepares the rootless

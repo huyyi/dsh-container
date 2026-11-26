@@ -125,6 +125,7 @@ jobs:
         run: |
           node --check scripts/registry-tarballs.mjs
           python3 tests/registry-plugins.py
+          python3 tests/mirrors.py
 
       - name: Validate compose example
         run: docker compose -f examples/compose.yaml config --quiet

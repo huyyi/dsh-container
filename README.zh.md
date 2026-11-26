@@ -82,6 +82,8 @@ sudo systemctl enable --now dsh.service
 | `DSH_PROXY_USER` / `DSH_PROXY_PASSWORD` | *(空)* | 对外代理的 basic auth(任何非回环部署都建议启用);成对设置或都不设 |
 | `DSH_TELEMETRY_MODE` | `DISABLED` | OTel 反馈上报策略;`FEEDBACK_ONLY` 恢复上游默认(显式反馈时上传),`DISABLED` 让 OTel 路径留在本地。它**不**控制 DeepSeek 会话日志贡献者([security.md](docs/security.md)) |
 | `DSH_SSH_ENABLED` | *(空)* | 启动可选的仅公钥 SSH 服务端(`1`/`true`/`yes`/`on`)。`DSH_SSH_PORT`(默认 `22`)指定容器内端口,`DSH_SSH_AUTHORIZED_KEYS` 投放公钥;没有公钥时任何人都无法登录 |
+| `DSH_APT_MIRROR` | *(未设置)* | 所有 Debian suite 使用的仓库 URL；停用镜像自带 NodeSource/GitHub CLI 源；仅改配置，不更新或清理索引 |
+| `DSH_PYPI_MIRROR` | *(未设置)* | pip/uv 系统配置使用的 PyPI simple-index URL；工具自身的高优先级配置仍有效 |
 
 其余全部使用内置默认值——dsh 数据在 `~/.dsh`,工作目录 `$HOME`,可写缓存在 `~/.cargo` / `~/.local/share`,镜像持有的工具在 `/usr/local/bin` 与 `/opt/rust`。整个 `/home/dsh` 是持久化边界:把它作为单一卷挂载;镜像升级替换工具链,从不动数据。细节见 [docs/build.md](docs/build.md) 与 [docs/deployment.md](docs/deployment.md)。
 

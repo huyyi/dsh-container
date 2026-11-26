@@ -543,6 +543,32 @@ controller-enabled cgroup subtree that the `dsh` user owns. No in-image change c
 so the docs promise the graceful degradation (containers run, limits are ignored) rather than
 limits that only work on some hosts.
 
+### Internal package mirrors
+
+Set `DSH_APT_MIRROR` to the full internal Debian repository URL, and `DSH_PYPI_MIRROR`
+to the internal PyPI simple-index URL. Only configuration is changed at startup: the entrypoint
+never updates or deletes apt indexes, installs packages, or checks network availability.
+Existing indexes can be older or newer than your mirror; handle any mismatch when using apt.
+
+```yaml
+environment:
+  DSH_APT_MIRROR: "https://apt.internal.example/repository/debian"
+  DSH_PYPI_MIRROR: "https://pypi.internal.example/simple"
+```
+
+The same apt URL is used for `bookworm`, `bookworm-updates` and `bookworm-security`; the internal
+repository must serve all configured suites. There is no separate security-mirror variable.
+The image's NodeSource and GitHub CLI apt repositories are disabled while this variable is set.
+Debian components and signature verification remain unchanged. User-added source files outside
+the image defaults are preserved. Removing the variable restores the image's source defaults.
+
+The PyPI setting writes `/etc/pip.conf` and `/etc/uv/uv.toml`, so new `docker exec` and sudo
+commands discover the system settings as well. The original system files are saved before first
+activation and restored when the variable is removed. While enabled, the system uv file is managed
+by this setting; user/project configuration, CLI options and standard tool environment variables
+retain their normal precedence. HTTP PyPI explicitly trusts the configured host for pip; HTTPS
+certificate verification is not disabled. No wheels or packages are fetched at startup.
+
 ## 8. Offline dsh plugins
 
 Third-party plugins are distributed separately from the image. The pinned
@@ -658,6 +684,9 @@ What the daemon does and does not do:
   agent forwarding and tunnel devices are off.
 - **A login is root-equivalent.** Treat the port like a root password: keep it on loopback as above,
   and read [security.md](security.md#ssh-access) before widening it.
+- **Existing SSH host keys survive restart.** Root checks the private host-key directory, and
+  validates existing keys without overwriting them. An invalid or encrypted key fails with a
+  specific diagnostic; repair it explicitly rather than silently rotating the host identity.
 - **SSH fails closed, the Web UI does not.** If the daemon cannot start (no passwordless sudo,
   invalid `DSH_SSH_PORT`), the container logs a warning and keeps serving 3081.
 

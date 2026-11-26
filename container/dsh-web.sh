@@ -158,7 +158,8 @@ prepare_sshd() {
   local kt bits keyfile
   for kt in ed25519 rsa; do
     keyfile="$SSH_HOST_KEY_DIR/ssh_host_${kt}_key"
-    if [ ! -s "$keyfile" ]; then
+    # host 目录为 root:0700，必须由 root 判断存在性；普通用户 test 会误判旧密钥。
+    if ! sudo -n test -e "$keyfile"; then
       echo "[dsh-web] generating SSH host key ($kt) in $SSH_HOST_KEY_DIR" >&2
       if [ "$kt" = "rsa" ]; then
         bits=3072
@@ -172,6 +173,10 @@ prepare_sshd() {
     # root sshd 只接受 root 属主、0600 的主机密钥(旧卷/旧镜像可能留下别的属主)。
     sudo -n chown root:root "$keyfile" || return 1
     sudo -n chmod 0600 "$keyfile" || return 1
+    if ! sudo -n ssh-keygen -y -P '' -f "$keyfile" >/dev/null; then
+      echo "[dsh-web] invalid or encrypted host key: $keyfile; existing key was preserved" >&2
+      return 1
+    fi
   done
   # 授权公钥: DSH_SSH_AUTHORIZED_KEYS 是最省事的投放方式(公钥不保密, 但会出现在
   # 编排配置与 inspect 里), 幂等去重; 标准位置 ~/.ssh/authorized_keys 同样可用。
@@ -201,6 +206,10 @@ start_sshd() {
   # 不 tail、不 wait, 由监督循环重启。
   # root 不能在启用 fs.protected_regular 的 /tmp 中打开普通用户创建的日志。
   sudo -n install -m 0644 -o root -g root /dev/null "$SSH_LOG" || return 1
+  if ! sudo -n /usr/sbin/sshd -t -f /etc/ssh/sshd_config.dsh -o "Port=$SSH_PORT"; then
+    echo "[dsh-web] sshd configuration validation failed" >&2
+    return 1
+  fi
   if ! sudo -n /usr/sbin/sshd -f /etc/ssh/sshd_config.dsh -E "$SSH_LOG" -o "Port=$SSH_PORT"; then
     echo "[dsh-web] sshd failed to start; log follows:" >&2
     cat "$SSH_LOG" >&2 2>/dev/null || true

@@ -554,7 +554,22 @@ if command -v ssh >/dev/null 2>&1; then
       dsh@127.0.0.1 true 2>/dev/null; then
     die "sshd accepted an unauthorized key (public-key-only auth is broken)"
   fi
-  echo "=== [smoke] SSH: authorized key logged in, unauthorized key rejected" >&2
+  # 旧主机密钥为 root 私有：重启后必须复用，不能再次进入 ssh-keygen 覆盖交互。
+  host_fingerprint="$("$DOCKER" exec "$ssh_cid" sudo -n sha256sum /home/dsh/.ssh/host/ssh_host_ed25519_key)"
+  "$DOCKER" restart "$ssh_cid" >/dev/null || die "SSH container restart failed"
+  ssh_login=""
+  for _ in $(seq 1 60); do
+    ssh_login="$(ssh -i "$ssh_keydir/id_ed25519" -p 2222 \
+      -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null -o ConnectTimeout=2 \
+      dsh@127.0.0.1 'id -un' 2>/dev/null || true)"
+    [ "$ssh_login" = "dsh" ] && break
+    sleep 1
+  done
+  [ "$ssh_login" = "dsh" ] || die "SSH failed to restart with existing host keys"
+  [ "$("$DOCKER" exec "$ssh_cid" sudo -n sha256sum /home/dsh/.ssh/host/ssh_host_ed25519_key)" = "$host_fingerprint" ] \
+    || die "SSH host key changed after restart"
+  echo "=== [smoke] SSH: authorized/unauthorized keys and restart with preserved host key passed" >&2
 else
   echo "=== [smoke] note: no ssh client on the host; skipped the real SSH login check" >&2
 fi
